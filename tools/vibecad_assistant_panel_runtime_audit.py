@@ -52,6 +52,9 @@ REQUIRED_WIDGETS = {
     "VibeCADStatus": QtWidgets.QLabel,
     "VibeCADToolPack": QtWidgets.QLabel,
     "VibeCADOutput": QtWidgets.QPlainTextEdit,
+    "VibeCADPhaseBanner": QtWidgets.QLabel,
+    "VibeCADPhaseContext": QtWidgets.QPlainTextEdit,
+    "VibeCADWorkflowAudit": QtWidgets.QPlainTextEdit,
     "VibeCADScreenshotStatus": QtWidgets.QLabel,
     "VibeCADPrompt": QtWidgets.QPlainTextEdit,
     "VibeCADRunStatus": QtWidgets.QLabel,
@@ -129,6 +132,7 @@ def audit_workbench(workbench: str) -> dict:
         "visible_domain_contexts": [],
         "missing_widgets": [],
         "failures": [],
+        "workflow_audit": "",
     }
 
     activated = bool(Gui.activateWorkbench(workbench))
@@ -169,10 +173,25 @@ def audit_workbench(workbench: str) -> dict:
 
     status = dock.findChild(QtWidgets.QLabel, "VibeCADStatus")
     tool_pack = dock.findChild(QtWidgets.QLabel, "VibeCADToolPack")
-    if status is None or "Workbench:" not in status.text():
+    if status is None or "OpenAI:" not in status.text():
+        result["failures"].append("status label does not report active workbench")
+    elif workbench.removesuffix("Workbench") not in status.text():
         result["failures"].append("status label does not report active workbench")
     if tool_pack is None or f"Tool pack: {workbench}" not in tool_pack.text():
         result["failures"].append("tool-pack label does not report active pack")
+    workflow_audit = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADWorkflowAudit")
+    workflow_text = workflow_audit.toPlainText() if workflow_audit is not None else ""
+    result["workflow_audit"] = workflow_text
+    if "Workflow audit: passed" not in workflow_text:
+        result["failures"].append("workflow audit does not report passed phase boundaries")
+    if "Failed gates: none" not in workflow_text:
+        result["failures"].append("workflow audit reports failed gates")
+    phase_context = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADPhaseContext")
+    phase_context_text = phase_context.toPlainText() if phase_context is not None else ""
+    result["phase_context"] = phase_context_text
+    for forbidden in ("Brief:", "Project root:", "/tmp/"):
+        if forbidden in phase_context_text:
+            result["failures"].append(f"visible phase context leaks storage detail: {forbidden}")
 
     expected_context = DOMAIN_CONTEXT_BY_WORKBENCH.get(workbench)
     contexts = visible_domain_contexts(dock)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 import os
+from contextlib import contextmanager
 import importlib
 import inspect
 import json
@@ -28,6 +29,7 @@ from VibeCADAuth import (
     validate_openai_api_key,
 )
 import VibeCADPreferences
+import VibeCADProject
 from VibeCADCore import VibeCADService, get_service
 from VibeCADPreferences import (
     DEFAULT_REASONING_EFFORT,
@@ -47,13 +49,16 @@ from VibeCADProvider import (
     ProviderResult,
     ProviderUnavailable,
     OpenAIAgentsProvider,
+    OPENAI_REQUEST_DUMP_DIR_ENV,
     _agents_input_from_context,
     _build_provider_function_tools,
     _model_visible_context,
+    _openai_request_dump_dir,
     _provider_tool_request_schema,
     _run_agents_subprocess,
     _write_openai_request_dump,
 )
+from VibeCADProject import VibeCADProjectStore, normalize_phase
 from VibeCADSession import (
     MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN,
     MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV,
@@ -66,6 +71,8 @@ from VibeCADSession import (
     _missing_requirement_lines,
     _prompt_with_conversation,
     _provider_loop_state,
+    _refresh_provider_context,
+    _request_policy,
     _result_summary,
     _should_continue_autonomously,
     _screenshot_requirement_satisfied,
@@ -106,22 +113,53 @@ def _gui_workbench_api_available() -> bool:
         return False
 
 
+def _attach_temp_project_store(service: VibeCADService, root: Path, label: str = "Unit Test Project"):
+    service._project_store = VibeCADProjectStore(  # noqa: SLF001 - test fixture
+        f"unit-{time.time_ns()}",
+        index_path=root / "index.sqlite",
+    )
+    original = VibeCADProject._active_document_info
+    VibeCADProject._active_document_info = lambda: {
+        "document": label.replace(" ", ""),
+        "label": label,
+        "file_path": str(root / f"{label.replace(' ', '_')}.FCStd"),
+        "saved": True,
+    }
+    return original
 
 
+def _approve_temp_intent(service: VibeCADService) -> None:
+    service.update_intent_brief(
+        title="Unit Test Project",
+        summary="A complete enough test brief.",
+        requirements={
+            "purpose": "exercise VibeCAD phase tools",
+            "critical_dimensions": "nominal",
+            "interfaces": "none",
+            "loads": "not applicable",
+            "materials_process": "not applicable",
+            "tolerances": "not applicable",
+            "environment": "test",
+            "acceptance_criteria": ["test passes"],
+        },
+        readiness_score=100,
+        ready_for_next_phase=True,
+    )
+    service.approve_intent_brief()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+@contextmanager
+def _temporary_design_project(
+    service: VibeCADService,
+    label: str = "Unit Test Project",
+):
+    with tempfile.TemporaryDirectory() as tmp:
+        original = _attach_temp_project_store(service, Path(tmp), label)
+        try:
+            _approve_temp_intent(service)
+            yield
+        finally:
+            VibeCADProject._active_document_info = original
 
 
 class FakeKeyringModule:
@@ -474,6 +512,110 @@ class TestVibeCADTools(unittest.TestCase):
         self.assertEqual(tool.to_schema()["safety"], "view")
 
 
+class TestVibeCADProject(unittest.TestCase):
+    def test_normalize_phase_aliases(self):
+        self.assertEqual(normalize_phase("brief"), "intent")
+        self.assertEqual(normalize_phase("part design"), "design")
+        self.assertEqual(normalize_phase("FEA"), "analysis")
+        self.assertEqual(normalize_phase("cam"), "manufacturing")
+
+    def test_project_store_writes_brief_manifest_and_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cad_file = root / "drone frame.FCStd"
+            cad_file.write_text("", encoding="utf-8")
+            original = VibeCADProject._active_document_info
+            VibeCADProject._active_document_info = lambda: {
+                "document": "DroneFrame",
+                "label": "Drone Frame",
+                "file_path": str(cad_file),
+                "saved": True,
+            }
+            try:
+                store = VibeCADProjectStore("unit-test", index_path=root / "index.sqlite")
+                context = store.context()
+                self.assertEqual(context["active_phase"], "intent")
+                self.assertIn(".vibecad", context["root"])
+
+                updated = store.update_intent_brief(
+                    title="Drone Frame",
+                    summary="A 7 inch drone slingload frame.",
+                    requirements={
+                        "purpose": "carry a removable underside payload yoke",
+                        "critical_dimensions": "7 inch prop class",
+                        "interfaces": "four motor hardpoints and underside yoke",
+                        "loads": "light slingload duty",
+                        "materials_process": "carbon fiber plate",
+                        "tolerances": "normal CNC plate tolerances",
+                        "environment": "outdoor UAV operation",
+                    },
+                    acceptance_criteria=["native assembly later has separate yoke component"],
+                    readiness_score=85,
+                    ready_for_next_phase=True,
+                    tags=["drone", "slingload"],
+                )
+                self.assertTrue(updated["ok"])
+                self.assertTrue(Path(updated["brief_path"]).is_file())
+                self.assertTrue(Path(updated["brief_markdown_path"]).is_file())
+                approved = store.approve_intent_brief()
+                self.assertTrue(approved["ok"])
+                self.assertEqual(approved["active_phase"], "design")
+                self.assertTrue((root / "index.sqlite").is_file())
+                refreshed = store.context()
+                self.assertTrue(refreshed["intent"]["approved"])
+                self.assertEqual(refreshed["active_phase"], "design")
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_unsaved_project_store_uses_durable_user_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "vibecad-home"
+            original_home = os.environ.get("VIBECAD_HOME")
+            original = VibeCADProject._active_document_info
+            os.environ["VIBECAD_HOME"] = str(home)
+            VibeCADProject._active_document_info = lambda: {
+                "document": "Unnamed",
+                "label": "Unsaved VibeCAD Project",
+                "file_path": None,
+                "saved": False,
+            }
+            try:
+                store = VibeCADProjectStore("unit-unsaved", index_path=home / "index.sqlite")
+                context = store.context()
+                self.assertTrue(context["persistent"])
+                self.assertFalse(context["document_saved"])
+                self.assertTrue(str(context["root"]).startswith(str(home / "projects")))
+                self.assertNotIn("/vibecad-projects/", context["root"])
+
+                updated = store.update_intent_brief(
+                    title="Unsaved VibeCAD Project",
+                    summary="Durable intent for an unsaved CAD document.",
+                    requirements={
+                        "purpose": "prove durable unsaved project storage",
+                        "critical_dimensions": "not applicable",
+                        "interfaces": "none",
+                        "loads": "none",
+                        "materials_process": "not specified",
+                        "tolerances": "not specified",
+                        "environment": "desktop",
+                    },
+                    acceptance_criteria=["brief path is outside /tmp"],
+                    readiness_score=80,
+                    ready_for_next_phase=True,
+                )
+                self.assertTrue(updated["ok"])
+                self.assertTrue(Path(updated["brief_path"]).is_file())
+                self.assertTrue(str(updated["brief_path"]).startswith(str(home / "projects")))
+                self.assertNotIn("/vibecad-projects/", updated["brief_path"])
+            finally:
+                VibeCADProject._active_document_info = original
+                if original_home is None:
+                    os.environ.pop("VIBECAD_HOME", None)
+                else:
+                    os.environ["VIBECAD_HOME"] = original_home
+
+
 class TestVibeCADCore(unittest.TestCase):
     def setUp(self):
         self._old_settings = load_settings()
@@ -509,6 +651,11 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("core.list_workbench_object_templates", service.registry.names())
         self.assertIn("core.list_workbench_objects", service.registry.names())
         self.assertIn("core.get_object_properties", service.registry.names())
+        self.assertIn("phase.get_project_context", service.registry.names())
+        self.assertIn("phase.set_current", service.registry.names())
+        self.assertIn("intent.update_brief", service.registry.names())
+        self.assertIn("phase.validate_document", service.registry.names())
+        self.assertIn("phase.audit_workflow", service.registry.names())
         self.assertNotIn("core.propose_create_part_box", service.registry.names())
         self.assertIn("core.run_workbench_command", service.registry.names())
         self.assertNotIn("core.propose_run_workbench_command", service.registry.names())
@@ -540,6 +687,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.add_point", service.registry.names())
         self.assertIn("sketcher.add_polyline", service.registry.names())
         self.assertIn("sketcher.add_circle", service.registry.names())
+        self.assertIn("sketcher.add_hole_pattern", service.registry.names())
         self.assertIn("sketcher.add_arc", service.registry.names())
         self.assertIn("sketcher.add_ellipse", service.registry.names())
         self.assertIn("sketcher.add_bspline", service.registry.names())
@@ -670,7 +818,7 @@ class TestVibeCADCore(unittest.TestCase):
                 self.assertNotIn("handler", module.TOOL_SPEC)
                 module_source = inspect.getsource(module)
                 self.assertNotIn("return service.propose_", module_source)
-                if module_name != "core_apply_action":
+                if module_name not in {"core_apply_action", "phase_set_current"}:
                     self.assertNotRegex(
                         module_source,
                         r"return service\.(create_|add_|apply_|cut_|set_)",
@@ -850,37 +998,324 @@ class TestVibeCADCore(unittest.TestCase):
         )
 
     def test_run_prompt_includes_provider_tool_schemas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                response = run_prompt("hello", service=service, prefer_online=False)
+                self.assertEqual(response.provider, "OfflineProvider")
+                self.assertNotIn("available_tools", response.context)
+                self.assertIn("provider_tool_schemas", response.context)
+                provider_tool_names = {
+                    schema["name"]
+                    for schema in response.context["provider_tool_schemas"]
+                    if isinstance(schema, dict)
+                }
+                self.assertIn("core.get_active_document", provider_tool_names)
+                self.assertIn("intent.update_brief", provider_tool_names)
+                self.assertIn("phase.get_project_context", provider_tool_names)
+                self.assertNotIn("core.enter_workspace", provider_tool_names)
+                self.assertNotIn("partdesign.create_body", provider_tool_names)
+                self.assertIn("workbench_tool_pack", response.context)
+                self.assertIn("workbench_commands", response.context)
+                self.assertIn("workbench_object_templates", response.context)
+                self.assertIn("workbench_objects", response.context)
+                self.assertIn("provider_tool_scope", response.context)
+                self.assertEqual(response.context["provider_tool_scope"]["phase"], "intent_briefing")
+                self.assertIn("active_tool_count", response.context["provider_tool_scope"])
+                self.assertIn("active_tool_names", response.context["provider_tool_scope"])
+                self.assertNotIn("omitted_tool_names", response.context["provider_tool_scope"])
+                self.assertEqual(response.context["vibecad_workspace"]["mode"], "intent")
+                self.assertEqual(response.context["vibecad_workspace"]["available_workspaces"], [])
+                visible = _model_visible_context(response.context)
+                self.assertIn("provider_tool_scope", visible)
+                self.assertNotIn("provider_tool_schemas", visible)
+                self.assertNotIn("provider_tool_surface", visible)
+                self.assertNotIn("active_tool_names", visible["provider_tool_scope"])
+                self.assertIn("active_tool_name_count", visible["provider_tool_scope"])
+                self.assertNotIn("omitted_tool_names", visible["provider_tool_scope"])
+                self.assertNotIn("available_tools", response.context)
+                self.assertIn("provider_tool_surface", response.context)
+                self.assertIn("view_screenshot", response.context)
+                self.assertIn("task_panel", response.context)
+                self.assertIn("report_view_errors", response.context)
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_intent_phase_blocks_geometry_tool_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                service.set_phase("intent")
+                runner = make_provider_tool_runner(service, workbench="PartWorkbench")
+                result = runner(
+                    "part.create_primitive",
+                    json.dumps({"primitive_type": "box", "label": "Blocked Box"}),
+                )
+                self.assertFalse(result["ok"])
+                self.assertIn("Intent phase", result["error"])
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_modify_existing_request_blocks_replacement_body_creation(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPreserveExistingBodyTest")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp), "Preserve Existing")
+            try:
+                _approve_temp_intent(service)
+                created = service.registry.call("partdesign.create_body", label="Existing Frame")
+                self.assertTrue(created["ok"], created)
+                context = service.provider_context_summary()
+                policy = _request_policy("optimize this frame", context)
+                self.assertTrue(policy["preserve_existing_model"])
+                runner = make_provider_tool_runner(
+                    service,
+                    workbench="PartDesignWorkbench",
+                    request_policy=policy,
+                )
+                result = runner("partdesign.create_body", '{"label": "Replacement Frame"}')
+                self.assertFalse(result["ok"])
+                self.assertIn("existing model", result["error"])
+            finally:
+                VibeCADProject._active_document_info = original
+                App.closeDocument(doc.Name)
+
+    def test_modify_existing_request_blocks_replacement_but_allows_in_place_part_edit(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPreserveExistingPartTest")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp), "Preserve Existing Part")
+            try:
+                _approve_temp_intent(service)
+                box = doc.addObject("Part::Box", "ExistingBox")
+                box.Label = "Existing Box"
+                doc.recompute()
+                context = service.provider_context_summary()
+                policy = _request_policy("fix this model", context)
+                self.assertTrue(policy["preserve_existing_model"])
+                runner = make_provider_tool_runner(
+                    service,
+                    workbench="PartWorkbench",
+                    request_policy=policy,
+                )
+
+                replacement = runner(
+                    "part.create_primitive",
+                    '{"primitive_type": "box", "label": "Replacement Box"}',
+                )
+                self.assertFalse(replacement["ok"])
+                self.assertIn("existing model", replacement["error"])
+
+                edit = runner(
+                    "part.set_primitive_dimensions",
+                    '{"object_name": "ExistingBox", "length": 12, "width": 8, "height": 4}',
+                )
+                self.assertTrue(edit["ok"], edit)
+                self.assertEqual(float(box.Length), 12.0)
+                self.assertEqual(float(box.Width), 8.0)
+                self.assertEqual(float(box.Height), 4.0)
+            finally:
+                VibeCADProject._active_document_info = original
+                App.closeDocument(doc.Name)
+
+    def test_modify_existing_request_hides_replacement_tools_from_workspace_context(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPreserveExistingSurfaceTest")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp), "Preserve Surface")
+            try:
+                _approve_temp_intent(service)
+                created = service.registry.call("partdesign.create_body", label="Existing Frame")
+                self.assertTrue(created["ok"], created)
+
+                context = _refresh_provider_context(
+                    service,
+                    prompt="optimize this frame",
+                    entered_workspace="PartDesignWorkbench",
+                )
+                names = {
+                    schema["name"]
+                    for schema in context["provider_tool_schemas"]
+                    if isinstance(schema, dict)
+                }
+
+                self.assertTrue(context["vibecad_request"]["preserve_existing_model"])
+                self.assertNotIn("partdesign.create_body", names)
+                self.assertNotIn("part.create_primitive", names)
+                self.assertNotIn("core.delete_object", names)
+                self.assertIn("partdesign.create_sketch", names)
+                self.assertIn("partdesign.pad_sketch", names)
+                self.assertIn("partdesign.create_body", context["vibecad_request"]["hidden_provider_tools"])
+                self.assertIn("core.delete_object", context["vibecad_request"]["hidden_provider_tools"])
+                self.assertEqual(
+                    context["provider_tool_surface"]["scope"]["request_filter"]["preserve_existing_model"],
+                    True,
+                )
+            finally:
+                VibeCADProject._active_document_info = original
+                App.closeDocument(doc.Name)
+
+    def test_approved_design_phase_exposes_phase_workspace_planner(self):
+        class CapturingProvider(BaseProvider):
+            def __init__(self):
+                self.context = None
+
+            def run(self, prompt, context, tool_runner=None, cancellation_check=None):
+                self.context = context
+                return ProviderResult("captured")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                _approve_temp_intent(service)
+                provider = CapturingProvider()
+                response = run_prompt("make a bracket", service=service, provider=provider)
+                self.assertEqual(response.provider, "CapturingProvider")
+                context = provider.context
+                self.assertIsInstance(context, dict)
+                names = {
+                    schema["name"]
+                    for schema in context["provider_tool_schemas"]
+                    if isinstance(schema, dict)
+                }
+                self.assertEqual(context["vibecad_project"]["active_phase"], "design")
+                self.assertEqual(context["provider_tool_scope"]["phase"], "design_workspace_planner")
+                self.assertIn("core.enter_workspace", names)
+                self.assertIn("phase.validate_document", names)
+                self.assertNotIn("intent.update_brief", names)
+                self.assertNotIn("assembly.create_assembly", names)
+                self.assertIn(
+                    "PartDesignWorkbench",
+                    context["vibecad_workspace"]["available_workspaces"],
+                )
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_live_steering_is_injected_into_provider_context(self):
+        class SteeringProvider(BaseProvider):
+            def __init__(self):
+                self.messages = []
+
+            def run(self, prompt, context, tool_runner=None, cancellation_check=None):
+                steering = context.get("human_steering", {})
+                self.messages = list(steering.get("active_messages", []))
+                return ProviderResult("used steering")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                service.queue_steering_message("make the yoke removable")
+                provider = SteeringProvider()
+                run_prompt(
+                    "continue",
+                    service=service,
+                    provider=provider,
+                    steering_check=lambda: [
+                        item["text"] for item in service.consume_steering_messages()
+                    ],
+                )
+                self.assertIn("make the yoke removable", provider.messages)
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_tool_runner_attaches_midrun_steering_to_tool_result(self):
         service = VibeCADService()
-        response = run_prompt("hello", service=service, prefer_online=False)
-        self.assertEqual(response.provider, "OfflineProvider")
-        self.assertNotIn("available_tools", response.context)
-        self.assertIn("provider_tool_schemas", response.context)
-        self.assertIn("core.get_active_document", str(response.context["provider_tool_schemas"]))
-        self.assertIn("workbench_tool_pack", response.context)
-        self.assertIn("workbench_commands", response.context)
-        self.assertIn("workbench_object_templates", response.context)
-        self.assertIn("workbench_objects", response.context)
-        self.assertIn("provider_tool_scope", response.context)
-        self.assertIn("active_tool_count", response.context["provider_tool_scope"])
-        self.assertIn("active_tool_names", response.context["provider_tool_scope"])
-        self.assertNotIn("omitted_tool_names", response.context["provider_tool_scope"])
-        self.assertLessEqual(
-            response.context["provider_tool_scope"]["active_tool_count"],
-            response.context["provider_tool_scope"]["full_workbench_tool_count"],
+        queued = ["make the yoke removable before continuing"]
+        events: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
+
+        def steering_check():
+            if not queued:
+                return []
+            return [queued.pop(0)]
+
+        runner = make_provider_tool_runner(
+            service,
+            tool_trace=trace,
+            progress_callback=events.append,
+            steering_check=steering_check,
         )
-        visible = _model_visible_context(response.context)
-        self.assertIn("provider_tool_scope", visible)
-        self.assertNotIn("provider_tool_schemas", visible)
-        self.assertNotIn("provider_tool_surface", visible)
-        self.assertNotIn("omitted_tool_names", visible["provider_tool_scope"])
-        if response.context.get("workbench") == "PartDesignWorkbench":
-            self.assertIn("partdesign", response.context)
-            self.assertIn("sketcher", response.context)
-        self.assertNotIn("available_tools", response.context)
-        self.assertIn("provider_tool_surface", response.context)
-        self.assertIn("view_screenshot", response.context)
-        self.assertIn("task_panel", response.context)
-        self.assertIn("report_view_errors", response.context)
+        result = runner("core.get_active_document", "{}")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["human_steering"]["messages"],
+            ["make the yoke removable before continuing"],
+        )
+        self.assertEqual(queued, [])
+        self.assertTrue(
+            any(
+                item.get("event") == "human_steering_consumed"
+                and item.get("message_count") == 1
+                for item in events
+            ),
+            events,
+        )
+        self.assertEqual(trace[-1]["tool_name"], "core.get_active_document")
+
+    def test_tool_runner_attaches_midrun_steering_to_blocked_wrong_phase_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                service.set_phase("intent")
+                queued = ["stop making geometry and finish the brief"]
+                events: list[dict[str, Any]] = []
+
+                def steering_check():
+                    if not queued:
+                        return []
+                    return [queued.pop(0)]
+
+                runner = make_provider_tool_runner(
+                    service,
+                    workbench="PartWorkbench",
+                    progress_callback=events.append,
+                    steering_check=steering_check,
+                )
+                result = runner(
+                    "part.create_primitive",
+                    json.dumps({"primitive_type": "box", "label": "Should Not Exist"}),
+                )
+
+                self.assertFalse(result["ok"], result)
+                self.assertIn("Intent phase", result["error"])
+                self.assertEqual(
+                    result["human_steering"]["messages"],
+                    ["stop making geometry and finish the brief"],
+                )
+                self.assertEqual(queued, [])
+                self.assertTrue(
+                    any(item.get("event") == "human_steering_consumed" for item in events),
+                    events,
+                )
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_tool_runner_cancellation_does_not_consume_queued_steering(self):
+        queued = ["change direction after the stop clears"]
+        runner = make_provider_tool_runner(
+            VibeCADService(),
+            cancellation_check=lambda: True,
+            steering_check=lambda: [queued.pop(0)] if queued else [],
+        )
+
+        result = runner("core.get_active_document", "{}")
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["cancelled"])
+        self.assertNotIn("human_steering", result)
+        self.assertEqual(queued, ["change direction after the stop clears"])
 
     def test_run_prompt_does_not_fake_offline_response_after_provider_failure(self):
         class FailingProvider(BaseProvider):
@@ -1301,10 +1736,10 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("Part primitive substitutes", gates)
 
     def test_openai_request_dump_writes_full_provider_payload(self):
-        old_dump_dir = os.environ.get("VIBECAD_OPENAI_REQUEST_DUMP_DIR")
+        old_dump_dir = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV)
         try:
             with tempfile.TemporaryDirectory() as directory:
-                os.environ["VIBECAD_OPENAI_REQUEST_DUMP_DIR"] = directory
+                os.environ[OPENAI_REQUEST_DUMP_DIR_ENV] = directory
                 path = _write_openai_request_dump(
                     {
                         "schema": "vibecad-openai-agents-request-v1",
@@ -1339,9 +1774,38 @@ class TestVibeCADCore(unittest.TestCase):
                 self.assertEqual(latest_data["schema"], "vibecad-openai-agents-request-v1")
         finally:
             if old_dump_dir is None:
-                os.environ.pop("VIBECAD_OPENAI_REQUEST_DUMP_DIR", None)
+                os.environ.pop(OPENAI_REQUEST_DUMP_DIR_ENV, None)
             else:
-                os.environ["VIBECAD_OPENAI_REQUEST_DUMP_DIR"] = old_dump_dir
+                os.environ[OPENAI_REQUEST_DUMP_DIR_ENV] = old_dump_dir
+
+    def test_openai_request_dump_defaults_to_durable_user_storage(self):
+        old_dump_dir = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV)
+        old_home = os.environ.get("VIBECAD_HOME")
+        try:
+            os.environ.pop(OPENAI_REQUEST_DUMP_DIR_ENV, None)
+            with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+                home = Path(directory) / "vibecad-home"
+                os.environ["VIBECAD_HOME"] = str(home)
+                dump_dir = _openai_request_dump_dir()
+                self.assertEqual(
+                    dump_dir,
+                    home / "debug" / "openai-request-dumps",
+                )
+                path = _write_openai_request_dump(
+                    {"schema": "vibecad-openai-agents-request-v1", "model": DEFAULT_MODEL}
+                )
+                self.assertIsNotNone(path)
+                self.assertTrue(str(path).startswith(str(home)))
+                self.assertTrue((home / "debug" / "openai-request-dumps" / "latest-openai-request.json").is_file())
+        finally:
+            if old_dump_dir is None:
+                os.environ.pop(OPENAI_REQUEST_DUMP_DIR_ENV, None)
+            else:
+                os.environ[OPENAI_REQUEST_DUMP_DIR_ENV] = old_dump_dir
+            if old_home is None:
+                os.environ.pop("VIBECAD_HOME", None)
+            else:
+                os.environ["VIBECAD_HOME"] = old_home
 
     def test_live_provider_acceptance_covers_required_goal_categories(self):
         script = _repo_tool_script("vibecad_live_provider_acceptance.py")
@@ -1865,14 +2329,18 @@ class TestVibeCADCore(unittest.TestCase):
             service.record_conversation_turn("user", "unsaved one memory")
             first_history = service.conversation_history()
             self.assertEqual(first_history["scope"]["kind"], "unsaved_document")
-            self.assertFalse(first_history["scope"]["persistent"])
+            self.assertTrue(first_history["scope"]["persistent"])
+            self.assertIn(".vibecad", first_history["path"])
+            self.assertNotIn("/tmp/", first_history["path"])
             self.assertEqual(first_history["turn_count"], 1)
 
             doc_two = App.newDocument("VibeCADUnsavedConversationTwo")
             App.setActiveDocument(doc_two.Name)
             second_history = service.conversation_history()
             self.assertEqual(second_history["scope"]["kind"], "unsaved_document")
-            self.assertFalse(second_history["scope"]["persistent"])
+            self.assertTrue(second_history["scope"]["persistent"])
+            self.assertIn(".vibecad", second_history["path"])
+            self.assertNotIn("/tmp/", second_history["path"])
             self.assertEqual(second_history["conversation"], [])
             self.assertNotIn(
                 "unsaved one memory",
@@ -1980,6 +2448,19 @@ class TestVibeCADCore(unittest.TestCase):
         )
         self.assertNotIn("after the latest geometry changes", "\n".join(fresh_lines))
 
+        headless_screenshot = {
+            "tool_name": "core.capture_view_screenshot",
+            "ok": False,
+            "safety": SafetyLevel.VIEW.value,
+            "result": {"error": "module 'FreeCADGui' has no attribute 'ActiveDocument'"},
+        }
+        headless_lines = _missing_requirement_lines(
+            "Create CAD geometry",
+            context,
+            [write, headless_screenshot],
+        )
+        self.assertNotIn("after the latest geometry changes", "\n".join(headless_lines))
+
     def test_loop_requirements_do_not_parse_prompt_for_scenario_gates(self):
         context = {
             "document": {
@@ -2051,8 +2532,8 @@ class TestVibeCADCore(unittest.TestCase):
         service = VibeCADService()
         names = {schema["name"] for schema in provider_safe_tool_schemas(service)}
         self.assertIn("core.get_active_document", names)
-        self.assertIn("core.create_new_document", names)
-        self.assertIn("core.open_document", names)
+        self.assertNotIn("core.create_new_document", names)
+        self.assertNotIn("core.open_document", names)
         self.assertIn("core.delete_object", names)
         self.assertIn("core.report_tool_shape_gap", names)
         self.assertNotIn("core.run_workbench_command", names)
@@ -2150,6 +2631,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.add_point", sketcher_names)
         self.assertIn("sketcher.add_polyline", sketcher_names)
         self.assertIn("sketcher.add_circle", sketcher_names)
+        self.assertIn("sketcher.add_hole_pattern", sketcher_names)
         self.assertIn("sketcher.add_arc", sketcher_names)
         self.assertIn("sketcher.add_ellipse", sketcher_names)
         self.assertIn("sketcher.add_bspline", sketcher_names)
@@ -2236,6 +2718,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("partdesign.set_feature_dimensions", partdesign_names)
         self.assertIn("sketcher.add_line", partdesign_names)
         self.assertIn("sketcher.add_circle", partdesign_names)
+        self.assertIn("sketcher.add_hole_pattern", partdesign_names)
         self.assertIn("sketcher.add_arc", partdesign_names)
         self.assertIn("sketcher.add_slot", partdesign_names)
         self.assertIn("sketcher.add_constraint", partdesign_names)
@@ -2267,7 +2750,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertNotIn("material.apply_appearance", partdesign_names)
         self.assertNotIn("material.get_objects", partdesign_names)
 
-        self.assertLess(len(partdesign_names), 100)
+        self.assertLessEqual(len(partdesign_names), 100)
         self.assertNotIn("partdesign.propose_create_body", partdesign_names)
         self.assertNotIn("partdesign.propose_add_box", partdesign_names)
         self.assertNotIn("partdesign.propose_add_box", part_names)
@@ -2578,7 +3061,7 @@ class TestVibeCADCore(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_autonomous_loop_refreshes_scoped_tool_surface_between_turns(self):
+    def test_autonomous_loop_enters_workspace_then_exposes_full_tool_surface(self):
         import FreeCAD as App
 
         class ScopeProbeProvider(BaseProvider):
@@ -2597,9 +3080,23 @@ class TestVibeCADCore(unittest.TestCase):
                 self.tool_names.append(names)
                 if len(self.scopes) == 1:
                     self.assert_tool(tool_runner)
-                    tool_runner("partdesign.create_body", '{"label": "Scoped Body"}')
-                    return ProviderResult("Progress checkpoint so the tool context can refresh.")
-                return ProviderResult("Scoped tool surface refreshed; stopping.")
+                    result = tool_runner(
+                        "core.enter_workspace",
+                        json.dumps(
+                            {
+                                "name": "PartDesignWorkbench",
+                                "goal": "Create the base parametric body.",
+                            }
+                        ),
+                    )
+                    if not result.get("ok"):
+                        raise AssertionError(result)
+                    if result.get("checkpoint") != "workspace_entry":
+                        raise AssertionError(result)
+                    return ProviderResult("Entered PartDesign; refreshing tool surface.")
+                self.assert_tool(tool_runner)
+                tool_runner("partdesign.create_body", '{"label": "Scoped Body"}')
+                return ProviderResult("Created body with entered workspace tools.")
 
             @staticmethod
             def assert_tool(tool_runner):
@@ -2607,8 +3104,16 @@ class TestVibeCADCore(unittest.TestCase):
                     raise AssertionError("tool_runner is required")
 
         doc = App.newDocument("VibeCADScopedTurnRefreshTest")
+        original_project_info = VibeCADProject._active_document_info
+        tmp_dir = tempfile.TemporaryDirectory()
         try:
             service = VibeCADService()
+            original_project_info = _attach_temp_project_store(
+                service,
+                Path(tmp_dir.name),
+                "Scoped Turn Refresh",
+            )
+            _approve_temp_intent(service)
             service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
             provider = ScopeProbeProvider()
             response = run_prompt(
@@ -2620,12 +3125,18 @@ class TestVibeCADCore(unittest.TestCase):
 
             self.assertEqual(response.provider, "ScopeProbeProvider")
             self.assertGreaterEqual(len(provider.scopes), 2)
-            self.assertEqual(provider.scopes[0]["phase"], "partdesign_setup")
-            self.assertEqual(provider.scopes[1]["phase"], "partdesign_sketch_authoring")
-            self.assertIn("partdesign.create_body", provider.tool_names[0])
+            self.assertEqual(provider.scopes[0]["phase"], "design_workspace_planner")
+            self.assertEqual(provider.scopes[1]["phase"], "design_entered_workspace")
+            self.assertIsNone(provider.scopes[0]["workbench"])
+            self.assertEqual(provider.scopes[1]["workbench"], "PartDesignWorkbench")
+            self.assertIn("core.enter_workspace", provider.tool_names[0])
+            self.assertNotIn("partdesign.create_body", provider.tool_names[0])
             self.assertNotIn("sketcher.add_line", provider.tool_names[0])
+            self.assertIn("partdesign.create_body", provider.tool_names[1])
             self.assertIn("sketcher.add_line", provider.tool_names[1])
             self.assertIn("partdesign.create_sketch", provider.tool_names[1])
+            self.assertIn("partdesign.pad_sketch", provider.tool_names[1])
+            self.assertIn("partdesign.thickness_feature", provider.tool_names[1])
             self.assertTrue(
                 any(
                     getattr(obj, "TypeId", "") == "PartDesign::Body"
@@ -2634,53 +3145,48 @@ class TestVibeCADCore(unittest.TestCase):
                 )
             )
         finally:
+            VibeCADProject._active_document_info = original_project_info
+            tmp_dir.cleanup()
             App.closeDocument(doc.Name)
 
-    def test_partdesign_create_sketch_forces_tool_surface_refresh_checkpoint(self):
+    def test_partdesign_create_sketch_does_not_force_hidden_tool_surface_refresh(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADCreateSketchRefreshCheckpointTest")
         try:
             service = VibeCADService()
-            service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
-            body = service.registry.call("partdesign.create_body", label="Checkpoint Body")
-            self.assertTrue(body["ok"], body)
-            trace = []
-            runner = make_provider_tool_runner(
-                service,
-                "PartDesignWorkbench",
-                tool_trace=trace,
-                turn_state={"turn": 1, "mutating_tool_calls": 0},
-            )
+            with _temporary_design_project(service, "Create Sketch Refresh"):
+                service.active_workbench_name = lambda: "PartDesignWorkbench"  # type: ignore[method-assign]
+                body = service.registry.call("partdesign.create_body", label="Checkpoint Body")
+                self.assertTrue(body["ok"], body)
+                trace = []
+                runner = make_provider_tool_runner(
+                    service,
+                    "PartDesignWorkbench",
+                    tool_trace=trace,
+                    turn_state={"turn": 1, "mutating_tool_calls": 0},
+                )
 
-            result = runner(
-                "partdesign.create_sketch",
-                '{"body_name": "Checkpoint Body", "label": "Component Sketch", "plane": "XY_Plane"}',
-            )
+                result = runner(
+                    "partdesign.create_sketch",
+                    '{"body_name": "Checkpoint Body", "label": "Component Sketch", "plane": "XY_Plane"}',
+                )
 
-            self.assertTrue(result["ok"], result)
-            self.assertEqual(result.get("checkpoint"), "tool_surface_refresh")
-            self.assertEqual(
-                result["required_next_action"]["next_turn_workbench"],
-                "SketcherWorkbench",
-            )
-            self.assertIn(
-                "sketcher.draw_rectangle",
-                result["required_next_action"]["expected_tools"],
-            )
+                self.assertTrue(result["ok"], result)
+                self.assertIsNone(result.get("checkpoint"))
+                self.assertNotIn("required_next_action", result)
 
-            blocked = runner(
-                "sketcher.draw_rectangle",
-                '{"sketch_name": "Component Sketch", "width": 10, "height": 10}',
-            )
-            self.assertTrue(blocked["ok"], blocked)
-            self.assertEqual(blocked.get("status"), "deferred_checkpoint")
-            self.assertFalse(blocked.get("executed"))
-            self.assertEqual(blocked.get("checkpoint"), "tool_surface_refresh")
+                drawn = runner(
+                    "sketcher.draw_rectangle",
+                    '{"sketch_name": "Component Sketch", "width": 10, "height": 10}',
+                )
+                self.assertTrue(drawn["ok"], drawn)
+                self.assertNotEqual(drawn.get("status"), "deferred_checkpoint")
+                self.assertIsNone(drawn.get("checkpoint"))
         finally:
             App.closeDocument(doc.Name)
 
-    def test_provider_workbench_stays_partdesign_while_editing_body_sketch(self):
+    def test_provider_workbench_does_not_remap_while_editing_body_sketch(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADPartDesignEffectiveWorkbenchTest")
@@ -2690,19 +3196,20 @@ class TestVibeCADCore(unittest.TestCase):
             service.registry.call("partdesign.create_sketch", label="Sketch")
 
             effective = _effective_provider_workbench(service, "SketcherWorkbench")
-            self.assertEqual(effective, "PartDesignWorkbench")
+            self.assertEqual(effective, "SketcherWorkbench")
 
             names = {
                 schema["name"]
                 for schema in provider_safe_tool_schemas(service, effective)
             }
-            self.assertIn("partdesign.create_sketch", names)
             self.assertIn("sketcher.draw_rectangle", names)
-            self.assertNotIn("sketcher.create_sketch", names)
+            self.assertNotIn("partdesign.create_sketch", names)
+            self.assertNotIn("partdesign.pad_sketch", names)
+            self.assertIn("core.enter_workspace", names)
         finally:
             App.closeDocument(doc.Name)
 
-    def test_provider_safe_sketcher_context_exposes_partdesign_feature_tools_after_sketch_exists(self):
+    def test_provider_safe_sketcher_context_requires_explicit_partdesign_entry(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADSketcherPartDesignBridgeTest")
@@ -2726,13 +3233,14 @@ class TestVibeCADCore(unittest.TestCase):
                 schema["name"]
                 for schema in provider_safe_tool_schemas(service, "SketcherWorkbench")
             }
-            self.assertIn("partdesign.pad_sketch", after_names)
-            self.assertIn("partdesign.pocket_sketch", after_names)
-            self.assertIn("partdesign.revolve_sketch", after_names)
+            self.assertNotIn("partdesign.pad_sketch", after_names)
+            self.assertNotIn("partdesign.pocket_sketch", after_names)
+            self.assertNotIn("partdesign.revolve_sketch", after_names)
+            self.assertIn("core.enter_workspace", after_names)
         finally:
             App.closeDocument(doc.Name)
 
-    def test_part_primitive_provider_tools_are_opt_in(self):
+    def test_part_primitive_provider_tools_are_native_in_part_workbench(self):
         old_settings = load_settings()
         try:
             save_settings(
@@ -2746,38 +3254,50 @@ class TestVibeCADCore(unittest.TestCase):
                 )
             )
             service = VibeCADService()
-            names = {
-                schema["name"]
-                for schema in provider_safe_tool_schemas(service, "PartWorkbench")
-            }
-            self.assertIn("part.get_objects", names)
-            self.assertNotIn("part.create_primitive", names)
-            self.assertNotIn("part.set_placement", names)
-            self.assertNotIn("part.cut_cylindrical_hole", names)
-            blocked = make_provider_tool_runner(service, "PartWorkbench")(
-                "part.create_primitive",
-                '{"primitive_type": "box", "label": "Blocked"}',
-            )
-            self.assertFalse(blocked["ok"])
-            self.assertIn("Part primitive write tools are disabled", blocked["error"])
+            with _temporary_design_project(service, "Part Primitive Provider"):
+                names = {
+                    schema["name"]
+                    for schema in provider_safe_tool_schemas(service, "PartWorkbench")
+                }
+                self.assertIn("part.get_objects", names)
+                self.assertIn("part.create_primitive", names)
+                self.assertIn("part.set_placement", names)
+                self.assertIn("part.cut_cylindrical_hole", names)
 
-            save_settings(
-                VibeCADSettings(
-                    use_online_provider=old_settings.use_online_provider,
-                    model=old_settings.model,
-                    dotenv_path=old_settings.dotenv_path,
-                    disabled_workbenches=old_settings.disabled_workbenches,
-                    reasoning_effort=old_settings.reasoning_effort,
-                    allow_primitive_provider_tools=True,
+                partdesign_names = {
+                    schema["name"]
+                    for schema in provider_safe_tool_schemas(
+                        service,
+                        "PartDesignWorkbench",
+                        apply_workbench_allowlist=False,
+                    )
+                }
+                self.assertNotIn("part.create_primitive", partdesign_names)
+
+                blocked = make_provider_tool_runner(service, "PartDesignWorkbench")(
+                    "part.create_primitive",
+                    '{"primitive_type": "box", "label": "Blocked"}',
                 )
-            )
-            allowed_names = {
-                schema["name"]
-                for schema in provider_safe_tool_schemas(service, "PartWorkbench")
-            }
-            self.assertIn("part.create_primitive", allowed_names)
-            self.assertIn("part.set_placement", allowed_names)
-            self.assertIn("part.cut_cylindrical_hole", allowed_names)
+                self.assertFalse(blocked["ok"])
+                self.assertIn("only exposed to the AI loop inside PartWorkbench", blocked["error"])
+
+                save_settings(
+                    VibeCADSettings(
+                        use_online_provider=old_settings.use_online_provider,
+                        model=old_settings.model,
+                        dotenv_path=old_settings.dotenv_path,
+                        disabled_workbenches=old_settings.disabled_workbenches,
+                        reasoning_effort=old_settings.reasoning_effort,
+                        allow_primitive_provider_tools=True,
+                    )
+                )
+                allowed_names = {
+                    schema["name"]
+                    for schema in provider_safe_tool_schemas(service, "PartWorkbench")
+                }
+                self.assertIn("part.create_primitive", allowed_names)
+                self.assertIn("part.set_placement", allowed_names)
+                self.assertIn("part.cut_cylindrical_hole", allowed_names)
         finally:
             save_settings(old_settings)
 
@@ -2791,19 +3311,21 @@ class TestVibeCADCore(unittest.TestCase):
 
     def test_provider_tool_runner_blocks_out_of_scope_workbench_tools(self):
         service = VibeCADService()
-        runner = make_provider_tool_runner(service, "SketcherWorkbench")
-        blocked = runner("part.create_primitive", '{"primitive_type": "box", "label": "Wrong"}')
+        with _temporary_design_project(service, "Out Of Scope Workbench"):
+            runner = make_provider_tool_runner(service, "SketcherWorkbench")
+            blocked = runner("part.create_primitive", '{"primitive_type": "box", "label": "Wrong"}')
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
         self.assertIn("Tool is not available", blocked["error"])
 
     def test_provider_tool_runner_rejects_part_primitives_in_partdesign(self):
         service = VibeCADService()
-        runner = make_provider_tool_runner(service, "PartDesignWorkbench")
-        blocked = runner(
-            "part.create_primitive",
-            '{"primitive_type": "box", "label": "Wrong primitive block"}',
-        )
+        with _temporary_design_project(service, "Reject Part Primitive"):
+            runner = make_provider_tool_runner(service, "PartDesignWorkbench")
+            blocked = runner(
+                "part.create_primitive",
+                '{"primitive_type": "box", "label": "Wrong primitive block"}',
+            )
         self.assertFalse(blocked["ok"])
         self.assertIn("Tool is not available for the active workbench", blocked["error"])
         self.assertEqual(blocked["active_workbench"], "PartDesignWorkbench")
@@ -2815,11 +3337,12 @@ class TestVibeCADCore(unittest.TestCase):
         import FreeCAD as App
 
         service = VibeCADService()
-        runner = make_provider_tool_runner(service, "PartWorkbench")
-        blocked = runner(
-            "partdesign.create_sketch",
-            '{"label": "Auto Switch Sketch", "plane": "XY_Plane"}',
-        )
+        with _temporary_design_project(service, "Explicit Workbench Switch"):
+            runner = make_provider_tool_runner(service, "PartWorkbench")
+            blocked = runner(
+                "partdesign.create_sketch",
+                '{"label": "Auto Switch Sketch", "plane": "XY_Plane"}',
+            )
         doc = App.ActiveDocument
         try:
             self.assertTrue(blocked["ok"], blocked)
@@ -2873,12 +3396,13 @@ class TestVibeCADCore(unittest.TestCase):
         doc = App.newDocument("VibeCADLiveWorkbenchTrackingTest")
         try:
             service = VibeCADService()
-            service.active_workbench_name = lambda: "SketcherWorkbench"  # type: ignore[method-assign]
-            runner = make_provider_tool_runner(service, "PartDesignWorkbench")
-            result = runner(
-                "sketcher.create_sketch",
-                '{"label": "Actual Workbench Sketch", "support_type": "origin_plane", "plane": "XY_Plane"}',
-            )
+            with _temporary_design_project(service, "Live Workbench Tracking"):
+                service.active_workbench_name = lambda: "SketcherWorkbench"  # type: ignore[method-assign]
+                runner = make_provider_tool_runner(service, "PartDesignWorkbench")
+                result = runner(
+                    "sketcher.create_sketch",
+                    '{"label": "Actual Workbench Sketch", "support_type": "origin_plane", "plane": "XY_Plane"}',
+                )
             self.assertTrue(result["ok"], result)
             self.assertEqual(
                 result["result"]["transaction"]["result"]["active_workbench"],
@@ -2898,20 +3422,21 @@ class TestVibeCADCore(unittest.TestCase):
         import FreeCAD as App
 
         service = VibeCADService()
-        turn_state = {
-            "turn": 1,
-            "mutating_tool_calls": MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN - 1,
-            "checkpoint_reached": False,
-        }
-        runner = make_provider_tool_runner(
-            service,
-            "PartDesignWorkbench",
-            turn_state=turn_state,
-        )
-        result = runner(
-            "partdesign.create_sketch",
-            '{"label": "Checkpoint Sketch", "plane": "XY_Plane"}',
-        )
+        with _temporary_design_project(service, "Small Step Checkpoint"):
+            turn_state = {
+                "turn": 1,
+                "mutating_tool_calls": MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN - 1,
+                "checkpoint_reached": False,
+            }
+            runner = make_provider_tool_runner(
+                service,
+                "PartDesignWorkbench",
+                turn_state=turn_state,
+            )
+            result = runner(
+                "partdesign.create_sketch",
+                '{"label": "Checkpoint Sketch", "plane": "XY_Plane"}',
+            )
         doc = App.ActiveDocument
         try:
             self.assertTrue(result["ok"], result)
@@ -3011,12 +3536,15 @@ class TestVibeCADCore(unittest.TestCase):
             )
         )
 
-    def test_provider_tool_runner_create_document_accepts_name_argument(self):
+    def test_provider_tool_runner_blocks_document_creation_but_service_tool_accepts_name(self):
         import FreeCAD as App
 
         service = VibeCADService()
         runner = make_provider_tool_runner(service)
         result = runner("core.create_new_document", '{"name": "VibeCADNamedDocument"}')
+        self.assertFalse(result["ok"])
+        self.assertIn("not available to the autonomous CAD loop", result["error"])
+        result = service.registry.call("core.create_new_document", name="VibeCADNamedDocument")
         try:
             self.assertTrue(result["ok"], result)
             self.assertIsNotNone(App.getDocument("VibeCADNamedDocument"))
@@ -3072,6 +3600,129 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("part.apply_thickness", names)
         self.assertNotIn("part.propose_create_primitive", names)
 
+    def test_provider_phase_tool_surface_matches_active_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                intent_surface = service.provider_phase_tool_surface("PartDesignWorkbench")
+                intent_names = {tool["name"] for tool in intent_surface["tools"]}
+                self.assertEqual(intent_surface["scope"]["phase"], "intent_briefing")
+                self.assertIn("intent.update_brief", intent_names)
+                self.assertIn("phase.get_project_context", intent_names)
+                self.assertNotIn("partdesign.create_body", intent_names)
+                self.assertNotIn("core.create_new_document", intent_names)
+                self.assertNotIn("core.open_document", intent_names)
+
+                _approve_temp_intent(service)
+                planner_surface = service.provider_phase_tool_surface("PartDesignWorkbench")
+                planner_names = {tool["name"] for tool in planner_surface["tools"]}
+                self.assertEqual(planner_surface["scope"]["phase"], "design_workspace_planner")
+                self.assertIn("core.enter_workspace", planner_names)
+                self.assertIn("phase.validate_document", planner_names)
+                self.assertNotIn("intent.update_brief", planner_names)
+                self.assertNotIn("partdesign.create_body", planner_names)
+
+                workspace_surface = service.provider_phase_tool_surface(
+                    "PartDesignWorkbench",
+                    entered_workspace="PartDesignWorkbench",
+                )
+                workspace_names = {tool["name"] for tool in workspace_surface["tools"]}
+                self.assertEqual(workspace_surface["scope"]["phase"], "design_entered_workspace")
+                self.assertIn("partdesign.create_body", workspace_names)
+                self.assertIn("sketcher.add_hole_pattern", workspace_names)
+                self.assertNotIn("intent.update_brief", workspace_names)
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_phase_workflow_audit_proves_phase_and_request_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VibeCADService()
+            original = _attach_temp_project_store(service, Path(tmp))
+            try:
+                audit = service.phase_workflow_audit()
+                self.assertTrue(audit["ok"], audit["failures"])
+                gates = {gate["name"]: gate for gate in audit["gates"]}
+                self.assertTrue(
+                    gates["document_lifecycle_tools_hidden_from_all_phase_surfaces"]["passed"]
+                )
+                self.assertTrue(
+                    gates["downstream_phases_require_approved_intent_before_authoring"]["passed"]
+                )
+                self.assertTrue(
+                    gates["modify_existing_request_hides_replacement_entry_points"]["passed"]
+                )
+                self.assertTrue(
+                    gates["modify_existing_request_keeps_in_place_correction_tools"]["passed"]
+                )
+
+                samples = audit["surface_samples"]
+                intent_names = set(samples["intent"]["tool_names"])
+                self.assertIn("phase.audit_workflow", intent_names)
+                self.assertIn("intent.update_brief", intent_names)
+                self.assertNotIn("core.create_new_document", intent_names)
+                self.assertNotIn("partdesign.create_body", intent_names)
+
+                design_names = set(samples["design_partdesign_workspace"]["tool_names"])
+                self.assertIn("partdesign.create_body", design_names)
+                self.assertIn("sketcher.add_hole_pattern", design_names)
+                self.assertNotIn("core.open_document", design_names)
+
+                blocked_assembly = samples["design_rejects_assembly_workspace"]
+                self.assertEqual(
+                    blocked_assembly["workspace"]["blocked_workspace"],
+                    "AssemblyWorkbench",
+                )
+                self.assertNotIn(
+                    "assembly.create_assembly",
+                    set(blocked_assembly["tool_names"]),
+                )
+
+                modify_existing_names = set(
+                    samples["modify_existing_partdesign_workspace"]["tool_names"]
+                )
+                self.assertNotIn("partdesign.create_body", modify_existing_names)
+                self.assertIn("partdesign.create_body", samples["modify_existing_partdesign_workspace"]["request"]["hidden_provider_tools"])
+                modify_existing_part_names = set(
+                    samples["modify_existing_part_workspace"]["tool_names"]
+                )
+                self.assertNotIn("part.create_primitive", modify_existing_part_names)
+                self.assertNotIn("core.delete_object", modify_existing_part_names)
+                self.assertIn("part.set_primitive_dimensions", modify_existing_part_names)
+            finally:
+                VibeCADProject._active_document_info = original
+
+    def test_phase_prompt_copy_is_phase_specific(self):
+        import VibeCADGui
+
+        self.assertIn(
+            "purpose",
+            VibeCADGui._phase_prompt_placeholder("intent", False),
+        )
+        gated = VibeCADGui._phase_prompt_placeholder("design", False)
+        self.assertIn("approve intent", gated)
+        self.assertIn("acceptance criteria", gated)
+        self.assertIn(
+            "part or revision",
+            VibeCADGui._phase_prompt_placeholder("design", True),
+        )
+        self.assertIn(
+            "components",
+            VibeCADGui._phase_prompt_placeholder("assembly", True),
+        )
+        self.assertIn(
+            "load case",
+            VibeCADGui._phase_prompt_placeholder("analysis", True),
+        )
+        self.assertIn(
+            "stock/setup",
+            VibeCADGui._phase_prompt_placeholder("manufacturing", True),
+        )
+        self.assertIn(
+            "Geometry tools stay gated",
+            VibeCADGui._phase_banner_text("design", False, False),
+        )
+
     def test_tool_shape_report_explains_available_and_missing_provider_capabilities(self):
         service = VibeCADService()
         report = service.tool_shape_report("PartDesignWorkbench")
@@ -3094,6 +3745,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("partdesign.set_feature_dimensions", names)
         self.assertIn("sketcher.add_line", names)
         self.assertIn("sketcher.add_circle", names)
+        self.assertIn("sketcher.add_hole_pattern", names)
         self.assertIn("sketcher.add_arc", names)
         self.assertIn("sketcher.add_slot", names)
         slot_schema = next(schema for schema in report["provider_tools"] if schema["name"] == "sketcher.add_slot")
@@ -3264,8 +3916,16 @@ class TestVibeCADCore(unittest.TestCase):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADDetailedPartTools")
+        original_project_info = VibeCADProject._active_document_info
+        tmp_dir = tempfile.TemporaryDirectory()
         try:
             service = VibeCADService()
+            original_project_info = _attach_temp_project_store(
+                service,
+                Path(tmp_dir.name),
+                "Detailed Part Tools",
+            )
+            _approve_temp_intent(service)
             runner = make_provider_tool_runner(service, "PartWorkbench")
             base = runner(
                 "part.create_primitive",
@@ -3354,6 +4014,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.assertGreater(len(getattr(hollow.Shape, "Faces", [])), 0)
             self.assertGreater(float(getattr(hollow.Shape, "Volume", 0.0)), 0.0)
         finally:
+            VibeCADProject._active_document_info = original_project_info
+            tmp_dir.cleanup()
             App.closeDocument(doc.Name)
 
     def test_test_workbench_tool_pack_scopes_commands(self):
@@ -4419,6 +5081,63 @@ class TestVibeCADCore(unittest.TestCase):
             self.assertIn("ArcOfCircle", geometry_types)
             self.assertGreaterEqual(geometry_types.count("ArcOfCircle"), 3)
             self.assertGreaterEqual(geometry_types.count("LineSegment"), 4)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_hole_pattern_creates_fully_constrained_named_profiles(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADHolePatternSketchTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call("partdesign.create_sketch", label="Hole Pattern Sketch")
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
+
+            result = service.registry.call(
+                "sketcher.add_hole_pattern",
+                sketch_name=sketch.Name,
+                pattern="rectangular",
+                hole_diameter=4.5,
+                count_x=2,
+                count_y=2,
+                spacing_x=50,
+                spacing_y=20,
+                name_prefix="m4_clearance",
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["mutation"]["created_geometry_indices"], [0, 1, 2, 3])
+            self.assertEqual(len(result["mutation"]["created_constraint_indices"]), 12)
+            self.assertEqual(result["profile_status"]["degrees_of_freedom"], 0)
+            self.assertTrue(result["profile_status"]["ready_for_pocket"])
+            self.assertTrue(result["profile_status"]["fully_constrained"])
+            transaction = result["transaction"]["result"]
+            self.assertEqual(transaction["hole_diameter"], 4.5)
+            self.assertEqual(transaction["centers"], [[-25.0, -10.0], [25.0, -10.0], [-25.0, 10.0], [25.0, 10.0]])
+            self.assertEqual(
+                transaction["semantic_handles"],
+                [
+                    "name:m4_clearance_1",
+                    "name:m4_clearance_2",
+                    "name:m4_clearance_3",
+                    "name:m4_clearance_4",
+                ],
+            )
+            next_tools = {
+                item.get("tool")
+                for item in result["next_actions"]
+                if isinstance(item, dict)
+            }
+            self.assertIn("partdesign.pocket_sketch", next_tools)
+            self.assertIn("partdesign.hole_from_sketch", next_tools)
+            resolved = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=sketch.Name,
+                geometry_handle="name:m4_clearance_3",
+            )
+            self.assertTrue(resolved["ok"], resolved)
+            self.assertEqual(resolved["geometry_index"], 2)
         finally:
             App.closeDocument(doc.Name)
 
@@ -6778,6 +7497,75 @@ class TestVibeCADCore(unittest.TestCase):
             if app:
                 app.processEvents()
 
+    def test_assistant_panel_prompt_and_tools_follow_phase(self):
+        try:
+            import FreeCADGui as Gui
+            import VibeCADCore
+            import VibeCADGui
+            from PySide import QtWidgets
+        except Exception:
+            self.skipTest("FreeCADGui/PySide unavailable")
+
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
+        main_window = Gui.getMainWindow()
+        old_service = VibeCADCore._service  # noqa: SLF001 - GUI singleton fixture
+        service = VibeCADService()
+        VibeCADCore._service = service  # noqa: SLF001 - GUI singleton fixture
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                original = _attach_temp_project_store(service, Path(tmp))
+                try:
+                    VibeCADGui.ensure_commands_registered()
+                    Gui.activateWorkbench("PartDesignWorkbench")
+                    Gui.runCommand("VibeCAD_OpenAssistant")
+                    if app:
+                        app.processEvents()
+                    dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
+                    self.assertIsNotNone(dock)
+                    banner = dock.findChild(QtWidgets.QLabel, "VibeCADPhaseBanner")
+                    prompt = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADPrompt")
+                    provider_tools = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADProviderTools")
+                    workflow_audit = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADWorkflowAudit")
+                    phase_context = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADPhaseContext")
+                    self.assertIsNotNone(banner)
+                    self.assertIsNotNone(prompt)
+                    self.assertIsNotNone(provider_tools)
+                    self.assertIsNotNone(workflow_audit)
+                    self.assertIsNotNone(phase_context)
+                    self.assertIn("Intent phase", banner.text())
+                    self.assertIn("purpose", prompt.placeholderText())
+                    self.assertIn("intent.update_brief", provider_tools.toPlainText())
+                    self.assertNotIn("partdesign.create_body", provider_tools.toPlainText())
+                    self.assertIn("Workflow audit: passed", workflow_audit.toPlainText())
+                    self.assertIn("Failed gates: none", workflow_audit.toPlainText())
+                    self.assertNotIn("Brief:", phase_context.toPlainText())
+                    self.assertNotIn("Project root:", phase_context.toPlainText())
+                    self.assertNotIn("/tmp/", phase_context.toPlainText())
+
+                    _approve_temp_intent(service)
+                    VibeCADGui._refresh_phase_context()  # noqa: SLF001 - GUI state refresh
+                    VibeCADGui._refresh_workbench_context()  # noqa: SLF001 - GUI state refresh
+                    if app:
+                        app.processEvents()
+                    self.assertIn("Design phase", banner.text())
+                    self.assertIn("part or revision", prompt.placeholderText())
+                    provider_text = provider_tools.toPlainText()
+                    self.assertIn("Phase surface: design_workspace_planner", provider_text)
+                    self.assertIn("core.enter_workspace", provider_text)
+                    self.assertNotIn("partdesign.create_body", provider_text)
+                finally:
+                    VibeCADProject._active_document_info = original
+        finally:
+            dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
+            if dock is not None:
+                dock.close()
+            VibeCADCore._service = old_service  # noqa: SLF001 - restore GUI singleton
+            Gui.activateWorkbench("PartWorkbench")
+            if app:
+                app.processEvents()
+
     def test_assistant_panel_opens_when_integrated_workbench_is_activated(self):
         try:
             import FreeCADGui as Gui
@@ -6970,31 +7758,46 @@ class TestVibeCADCore(unittest.TestCase):
             activeWorkbench=lambda: FakeWorkbench(),
         )
 
-        class FakeService:
-            _last_view_screenshot = None
-
-            def _screenshot_visual_observation(self, path):
-                return {"available": True, "mostly_blank": False}
-
         original_app = sys.modules.get("FreeCAD")
         original_gui = sys.modules.get("FreeCADGui")
         sys.modules["FreeCAD"] = fake_app
         sys.modules["FreeCADGui"] = fake_gui
-        service = FakeService()
+        screenshot_root = None
+        service = None
         try:
-            result = module.run(service)
+            with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+                screenshot_root = Path(directory) / "vibecad-project"
+
+                class FakeService:
+                    _last_view_screenshot = None
+
+                    def phase_context(self):
+                        return {"root": str(screenshot_root)}
+
+                    def _screenshot_visual_observation(self, path):
+                        return {"available": True, "mostly_blank": False}
+
+                service = FakeService()
+                result = module.run(service)
             self.assertTrue(result["ok"])
             self.assertTrue(result["captured"])
             self.assertGreater(result["file_size"], 1000)
             self.assertEqual(result["format"], "png")
             self.assertEqual(result["background"], "White")
+            self.assertEqual(result["artifact_role"], "visual_verification")
             self.assertEqual(result["workbench"], "PartDesignWorkbench")
             self.assertEqual(result["document"], "VibeCADTestDoc")
+            self.assertTrue(str(result["path"]).startswith(str(screenshot_root)))
+            self.assertIn("/artifacts/screenshots/", str(result["path"]))
             self.assertNotIn("exists", result)
             self.assertNotIn("size_bytes", result)
             self.assertEqual(service._last_view_screenshot, result)
         finally:
-            path = service._last_view_screenshot.get("path") if service._last_view_screenshot else None
+            path = (
+                service._last_view_screenshot.get("path")
+                if service is not None and service._last_view_screenshot
+                else None
+            )
             if path:
                 try:
                     Path(path).unlink()

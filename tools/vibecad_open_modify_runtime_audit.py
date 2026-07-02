@@ -21,7 +21,7 @@ except Exception as exc:  # pragma: no cover - requires GUI FreeCAD
 
 from VibeCADCore import VibeCADService
 from VibeCADPreferences import VibeCADSettings, load_settings, save_settings
-from VibeCADSession import make_provider_tool_runner
+from VibeCADSession import make_provider_tool_runner, _request_policy
 
 
 FIXTURE = (
@@ -71,15 +71,55 @@ def main() -> int:
             allow_primitive_provider_tools=True,
         )
     )
-    service = VibeCADService()
     Gui.activateWorkbench("PartWorkbench")
     process_events()
-    runner = make_provider_tool_runner(service, "PartWorkbench")
 
-    open_result = runner("core.open_document", json.dumps({"file_path": str(FIXTURE)}))
+    opened_doc = None
+    try:
+        opened_doc = App.openDocument(str(FIXTURE))
+        App.setActiveDocument(opened_doc.Name)
+        Gui.ActiveDocument = Gui.getDocument(opened_doc.Name)
+        Gui.updateGui()
+        process_events(10)
+    except Exception as exc:
+        failures.append(f"harness failed to open fixture as active UI document: {exc}")
+
+    service = VibeCADService()
+    service.update_intent_brief(
+        title="Open Modify Runtime Audit",
+        summary="Modify the active fixture document in place and verify the result visually.",
+        requirements={
+            "purpose": "prove existing-model modification flow",
+            "critical_dimensions": "set the existing box to 12 x 8 x 4 mm",
+            "interfaces": "none",
+            "loads": "not applicable",
+            "materials_process": "not applicable",
+            "tolerances": "not applicable",
+            "environment": "runtime GUI audit",
+            "acceptance_criteria": ["existing box dimensions are updated", "viewport screenshot is captured"],
+        },
+        readiness_score=100,
+        ready_for_next_phase=True,
+    )
+    approval = service.approve_intent_brief(
+        approved_by="runtime-audit",
+        notes="Harness-opened document is the design authority.",
+        transition_to_design=True,
+    )
+    if not approval.get("ok"):
+        failures.append(f"intent approval failed: {approval}")
+
+    context = service.provider_context_summary()
+    request_policy = _request_policy("fix this model", context)
+    runner = make_provider_tool_runner(
+        service,
+        "PartWorkbench",
+        request_policy=request_policy,
+    )
+
     process_events(10)
-    if not open_result.get("ok"):
-        failures.append(f"core.open_document failed: {open_result}")
+    if opened_doc is None:
+        failures.append("fixture was not opened as the active document")
 
     document = service.document_summary()
     cube_before = next(
@@ -91,18 +131,23 @@ def main() -> int:
         None,
     )
     if cube_before is None:
-        failures.append("opened document did not expose Cube/Box object")
+        failures.append("active fixture document did not expose Cube/Box object")
+    target_name = (
+        str(cube_before.get("name") or cube_before.get("label") or "Cube")
+        if isinstance(cube_before, dict)
+        else "Cube"
+    )
 
     edit_result = runner(
         "part.set_primitive_dimensions",
-        json.dumps({"object_name": "Cube", "length": 12, "width": 8, "height": 4}),
+        json.dumps({"object_name": target_name, "length": 12, "width": 8, "height": 4}),
     )
     process_events(10)
     if not edit_result.get("ok"):
         failures.append(f"part.set_primitive_dimensions failed: {edit_result}")
 
     active_doc = App.ActiveDocument
-    cube = active_doc.getObject("Box") if active_doc else None
+    cube = active_doc.getObject(target_name) if active_doc else None
     if cube is None:
         failures.append("Cube object missing after edit")
     else:
@@ -132,7 +177,8 @@ def main() -> int:
         "ok": not failures,
         "failures": failures,
         "fixture": str(FIXTURE),
-        "open_ok": bool(open_result.get("ok")),
+        "setup_open_ok": opened_doc is not None,
+        "preserve_existing_request": request_policy,
         "edit_ok": bool(edit_result.get("ok")),
         "document": {
             "name": final_document.get("document"),

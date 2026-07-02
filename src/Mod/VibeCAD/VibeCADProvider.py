@@ -20,7 +20,19 @@ from typing import Any, Callable
 
 MAX_PROVIDER_IMAGE_BYTES = 2_000_000
 OPENAI_REQUEST_DUMP_DIR_ENV = "VIBECAD_OPENAI_REQUEST_DUMP_DIR"
-DEFAULT_OPENAI_REQUEST_DUMP_DIR = Path("/tmp/vibecad-openai-request-dumps")
+
+
+def _vibecad_home() -> Path:
+    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    try:
+        return Path.home() / ".vibecad"
+    except Exception:
+        return Path.cwd() / ".vibecad"
+
+
+DEFAULT_OPENAI_REQUEST_DUMP_DIR = _vibecad_home() / "debug" / "openai-request-dumps"
 
 
 class ProviderUnavailable(RuntimeError):
@@ -332,7 +344,7 @@ def _openai_request_dump_dir() -> Path | None:
     configured = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV, "").strip()
     if configured:
         return Path(configured).expanduser()
-    return DEFAULT_OPENAI_REQUEST_DUMP_DIR
+    return _vibecad_home() / "debug" / "openai-request-dumps"
 
 
 def _write_openai_request_dump(payload: dict[str, Any]) -> str | None:
@@ -444,29 +456,42 @@ def _agents_child_main(
             "Operate by the current FreeCAD state, not by memory or prose. Use "
             "get_current_freecad_context when you need context. The current "
             "document, active workbench, task panel, screenshot observation, "
-            "vibecad_loop.next_step, remaining_outcomes, and recent tool results "
+            "vibecad_project, vibecad_workspace, vibecad_loop.next_step, "
+            "phase_validation, state_validation_notes, human_steering, and recent tool results "
             "are authoritative.\n\n"
-            "Use the direct function tools exposed to you for this active "
-            "workbench. Each function is a native FreeCAD operation with a "
-            "single purpose. Do not invent tool names or route work through a "
-            "generic dispatcher. Workbench-scoped function tools are refreshed "
-            "after explicit workbench switches. If the native tool you need is "
-            "owned by another workbench, call core.activate_workbench for that "
-            "workbench and finish the current turn when VibeCAD returns the "
-            "workbench-switch checkpoint; the next turn will expose that "
-            "workbench's direct function tools. Do not report a tool-shape gap "
-            "for a known native tool until you have tried switching to the "
-            "owning workbench and inspecting the refreshed tool surface.\n\n"
-            "Some native tools change the active edit/task context even when "
-            "they are not explicit workbench switches. In particular, creating "
-            "or opening a Sketch starts a Sketcher editing phase, and closing a "
-            "ready Sketch can return work to PartDesign feature creation. When "
-            "a tool returns checkpoint='tool_surface_refresh' or "
-            "required_next_action.finish_current_turn, stop that provider turn "
-            "with concise progress. VibeCAD will immediately refresh the direct "
-            "callable tools and continue the same user goal in the next turn. "
-            "Do not report a tool-shape gap for tools that are expected after "
-            "that refresh.\n\n"
+            "VibeCAD is phase-native. In Intent phase, do not create geometry. "
+            "Interview the user only when critical context is missing, then call "
+            "intent.update_brief to write both the human brief and machine "
+            "contract. Design, Assembly, Analysis, and Manufacturing phases "
+            "need a usable working intent brief before CAD authoring tools are "
+            "available. If the phase is wrong, call phase.set_current with a "
+            "reason; do not silently use tools from another phase.\n\n"
+            "Preserve the user's existing model by default. If the request says "
+            "fix, correct, improve, optimize, modify, add to, this model, current "
+            "model, selected object, or otherwise refers to existing geometry, "
+            "treat the active/selected CAD object as the design authority. "
+            "Inspect it, identify the target object/body/sketch, and modify that "
+            "history or add corrective features in place. Do not create a new "
+            "document, replacement Body, or clean rebuild unless the user "
+            "explicitly asked for a replacement/rebuild/from-scratch design.\n\n"
+            "After Intent, the first provider turn in a phase may expose only a "
+            "small phase/workspace planning surface. In planner mode, inspect "
+            "only as needed and call core.enter_workspace with one allowed "
+            "FreeCAD workbench and your short goal for that workspace session. "
+            "The next provider turn will expose the full useful native "
+            "function-tool surface for that workspace. In workspace mode, use "
+            "those concrete tools directly. Do not invent tool names, do not "
+            "route work through a generic dispatcher, and do not ask the user to "
+            "choose tools. The callable function list is already your tool menu. "
+            "If a different workspace or phase is the better next place to work, "
+            "call core.enter_workspace or phase.set_current and stop when VibeCAD "
+            "returns a checkpoint.\n\n"
+            "State validation notes are observations from FreeCAD, not a "
+            "deterministic design recipe. You own the CAD decomposition, "
+            "dimensions, feature strategy, handoffs, and judgement about whether "
+            "the result is good enough. Use validation, report-view errors, "
+            "solver state, object summaries, and screenshots as evidence while "
+            "keeping the design intent model-driven.\n\n"
             "Drive FreeCAD the way a skilled human operator would with native "
             "tools. Choose the workbench and operations that fit the requested "
             "CAD outcome, then build editable model structure instead of visual "
@@ -491,10 +516,10 @@ def _agents_child_main(
             "millimeters, sensible origin/plane choices, and standard workbench "
             "conventions. Ask a question only when continuing would be "
             "destructive, impossible, or materially ambiguous.\n\n"
-            "Do not report completion until remaining_outcomes is empty or the "
-            "current document and screenshot state prove the requested CAD result "
-            "is coherent. For visible models, capture and inspect a viewport "
-            "screenshot before final completion."
+            "Do not report completion from prose alone. The current document and "
+            "phase validator must prove the requested CAD result is coherent. "
+            "For visible models, capture and inspect a viewport screenshot before "
+            "final completion."
         ),
         "model": model,
         "tools": [

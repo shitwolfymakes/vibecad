@@ -352,7 +352,15 @@ void StartupPostProcess::checkOpenGL()
 
     QOpenGLContext context;
     if (context.create()) {
-        context.makeCurrent(&window);
+        if (!context.makeCurrent(&window)) {
+            Base::Console().warning(
+                "OpenGL context was created but could not be made current "
+                "on the Qt platform '%s'.\n",
+                qPrintable(QGuiApplication::platformName())
+            );
+            return;
+        }
+
         if (!context.functions()->hasOpenGLFeature(QOpenGLFunctions::Framebuffers)) {
             Base::Console().log("This system does not support framebuffer objects\n");
         }

@@ -6,15 +6,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import re
-import tempfile
 import time
 from typing import Any
 import uuid
 
 from VibeCADAuth import AuthState, read_dotenv_key, read_keyring_key, resolve_auth_state
 from VibeCADPreferences import configured_dotenv_path, load_settings
+from VibeCADProject import PHASE_SPECS, VibeCADProjectStore, normalize_phase
 from VibeCADTools import SafetyLevel, ToolRegistry
 from VibeCADTransactions import ApprovalQueue
 from VibeCADWorkbenchTools import get_tool_pack, list_tool_packs
@@ -26,6 +27,16 @@ MAX_CONTEXT_OBJECTS = 25
 MAX_CONTEXT_COMMANDS = 120
 MAX_CONTEXT_WORKBENCH_OBJECTS = 40
 MAX_CONVERSATION_TURNS = 40
+
+
+def _vibecad_user_data_dir() -> Path:
+    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    try:
+        return Path.home() / ".vibecad"
+    except Exception:
+        return Path.cwd() / ".vibecad"
 
 
 class VibeCADService:
@@ -40,6 +51,9 @@ class VibeCADService:
         self._conversation_cache_key: str | None = None
         self._local_session_id = uuid.uuid4().hex
         self._tool_shape_feedback: list[dict[str, Any]] = []
+        self._project_store = VibeCADProjectStore(self._local_session_id)
+        self._steering_messages: list[dict[str, Any]] = []
+        self._steering_sequence = 0
         self._register_core_tools()
 
     @property
@@ -1702,6 +1716,481 @@ class VibeCADService:
     def action_history(self) -> dict[str, Any]:
         return {"history": self._approvals.history()}
 
+    def phase_context(self) -> dict[str, Any]:
+        return self._project_store.context()
+
+    def set_phase(self, phase: str, reason: str = "", requested_by: str = "user") -> dict[str, Any]:
+        return self._project_store.set_phase(
+            phase,
+            reason=reason,
+            requested_by=requested_by,
+        )
+
+    def update_intent_brief(
+        self,
+        *,
+        title: str = "",
+        summary: str = "",
+        requirements: dict[str, Any] | None = None,
+        assumptions: list[str] | None = None,
+        open_questions: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+        readiness_score: int | float | None = None,
+        ready_for_next_phase: bool | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self._project_store.update_intent_brief(
+            title=title,
+            summary=summary,
+            requirements=requirements or {},
+            assumptions=assumptions,
+            open_questions=open_questions,
+            acceptance_criteria=acceptance_criteria,
+            readiness_score=readiness_score,
+            ready_for_next_phase=ready_for_next_phase,
+            tags=tags,
+        )
+
+    def approve_intent_brief(
+        self,
+        approved_by: str = "user",
+        notes: str = "",
+        transition_to_design: bool = True,
+    ) -> dict[str, Any]:
+        return self._project_store.approve_intent_brief(
+            approved_by=approved_by,
+            notes=notes,
+            transition_to_design=transition_to_design,
+        )
+
+    def phase_allowed_workbenches(self, phase: str | None = None) -> tuple[str, ...]:
+        context = self.phase_context()
+        target_phase = normalize_phase(phase or context.get("active_phase") or "intent")
+        return tuple(PHASE_SPECS[target_phase]["allowed_workbenches"])
+
+    def validate_phase_document(self, phase: str | None = None) -> dict[str, Any]:
+        context = self.phase_context()
+        target_phase = normalize_phase(phase or context.get("active_phase") or "intent")
+        intent = context.get("intent", {}) if isinstance(context, dict) else {}
+        approved = bool(intent.get("approved"))
+        gates: list[dict[str, Any]] = []
+
+        def add_gate(name: str, passed: bool, evidence: Any = None) -> None:
+            gates.append({"name": name, "passed": bool(passed), "evidence": evidence})
+
+        add_gate("approved_intent_contract", target_phase == "intent" or approved)
+        if target_phase == "intent":
+            readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
+            add_gate("intent_brief_exists", bool(intent.get("brief")))
+            add_gate(
+                "intent_ready_for_approval",
+                bool(readiness.get("ready_for_next_phase")),
+                readiness,
+            )
+        elif target_phase == "design":
+            document = self.document_summary()
+            objects = document.get("objects", []) if isinstance(document, dict) else []
+            solids = sum(
+                int((item.get("shape") or {}).get("solids", 0) or 0)
+                for item in objects
+                if isinstance(item, dict)
+            )
+            partdesign = self.partdesign_summary()
+            native_features = 0
+            for body in partdesign.get("bodies", []) or []:
+                for feature in body.get("features", []) or []:
+                    type_id = str(feature.get("type") or "")
+                    if type_id.startswith("PartDesign::") and type_id not in {
+                        "PartDesign::Body",
+                        "PartDesign::CoordinateSystem",
+                        "PartDesign::Origin",
+                    }:
+                        native_features += 1
+            add_gate("document_has_objects", int(document.get("object_count", 0) or 0) > 0, document.get("object_count"))
+            add_gate("document_has_solid_geometry", solids > 0, {"solid_count": solids})
+            add_gate("partdesign_or_direct_features_exist", native_features > 0 or solids > 0, {"native_feature_count": native_features})
+        elif target_phase == "assembly":
+            assembly = self.assembly_summary()
+            assemblies = assembly.get("assemblies", []) or []
+            component_count = 0
+            joint_count = 0
+            for item in assemblies:
+                if not isinstance(item, dict):
+                    continue
+                component_count = max(component_count, int(item.get("components", 0) or 0))
+                joint_count = max(joint_count, int(item.get("joints", 0) or 0))
+            add_gate("native_assembly_exists", int(assembly.get("assembly_count", 0) or 0) > 0, assembly.get("assembly_count"))
+            add_gate("multiple_components_exist", component_count >= 2, {"component_count": component_count})
+            add_gate("assembly_relationships_exist", joint_count > 0 or component_count >= 2, {"joint_count": joint_count})
+        elif target_phase == "analysis":
+            fem = self.fem_summary()
+            selected = fem.get("selected") or {}
+            categories = selected.get("member_categories", {}) if isinstance(selected, dict) else {}
+            add_gate("fem_analysis_exists", int(fem.get("analysis_count", 0) or 0) > 0, fem.get("analysis_count"))
+            add_gate("material_load_constraint_or_mesh_evidence", bool(categories), categories)
+        elif target_phase == "manufacturing":
+            cam = self.cam_summary()
+            add_gate("cam_job_exists", int(cam.get("job_count", 0) or 0) > 0, cam.get("job_count"))
+            selected = cam.get("selected") or {}
+            add_gate("cam_job_has_model_or_operations", bool(selected.get("model") or selected.get("operations")), selected)
+
+        failures = [gate for gate in gates if not gate["passed"]]
+        return {
+            "ok": not failures,
+            "phase": target_phase,
+            "project_id": context.get("project_id"),
+            "gates": gates,
+            "failures": failures,
+            "next_action": (
+                "Phase evidence is sufficient for review."
+                if not failures
+                else "Resolve failed gates before reporting this phase complete."
+            ),
+        }
+
+    def phase_workflow_audit(self) -> dict[str, Any]:
+        from VibeCADSession import (
+            DOCUMENT_MANAGEMENT_TOOLS,
+            NON_GEOMETRY_PROVIDER_WRITE_TOOLS,
+            PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS,
+            _apply_phase_provider_surface,
+            _apply_request_policy_provider_surface,
+            _request_policy,
+        )
+
+        base_context = self.phase_context()
+        active_workbench = self.active_workbench_name()
+        gates: list[dict[str, Any]] = []
+
+        def add_gate(name: str, passed: bool, evidence: Any = None) -> None:
+            gates.append({"name": name, "passed": bool(passed), "evidence": evidence})
+
+        def phase_context_for(phase: str, *, approved: bool) -> dict[str, Any]:
+            normalized = normalize_phase(phase)
+            spec = dict(PHASE_SPECS[normalized])
+            context = dict(base_context)
+            context["active_phase"] = normalized
+            context["phase"] = {
+                "name": normalized,
+                "label": spec["label"],
+                "goal": spec["goal"],
+                "allowed_workbenches": list(spec["allowed_workbenches"]),
+                "requires_approved_intent": bool(spec["requires_approved_intent"]),
+                "success_gates": list(spec["success_gates"]),
+            }
+            intent = dict(context.get("intent", {}) if isinstance(context.get("intent"), dict) else {})
+            intent["approved"] = bool(approved)
+            if approved and not intent.get("brief"):
+                intent["brief"] = {
+                    "schema": "vibecad-audit-placeholder",
+                    "summary": "Synthetic approved intent used only for workflow surface auditing.",
+                }
+            context["intent"] = intent
+            return context
+
+        def geometry_write_tool_names(tool_names: set[str]) -> list[str]:
+            result: list[str] = []
+            for name in sorted(tool_names):
+                try:
+                    tool = self.registry.get(name)
+                except KeyError:
+                    continue
+                if tool.safety is SafetyLevel.SAFE_WRITE and name not in NON_GEOMETRY_PROVIDER_WRITE_TOOLS:
+                    result.append(name)
+            return result
+
+        def sample_surface(
+            label: str,
+            phase: str,
+            *,
+            approved: bool,
+            entered_workspace: str | None = None,
+            prompt: str | None = None,
+            synthetic_object_count: int | None = None,
+        ) -> dict[str, Any]:
+            context: dict[str, Any] = {}
+            _apply_phase_provider_surface(
+                self,
+                context,
+                active_workbench,
+                phase_context=phase_context_for(phase, approved=approved),
+                entered_workspace=entered_workspace,
+            )
+            if synthetic_object_count is not None:
+                context["document"] = {"object_count": int(synthetic_object_count)}
+            if prompt is not None:
+                request_policy = _request_policy(prompt, context)
+                context["vibecad_request"] = request_policy
+                _apply_request_policy_provider_surface(self, context, request_policy)
+            schemas = context.get("provider_tool_schemas", [])
+            if not isinstance(schemas, list):
+                surface = context.get("provider_tool_surface", {})
+                schemas = surface.get("tools", []) if isinstance(surface, dict) else []
+            tool_names = {
+                str(schema.get("name") or "")
+                for schema in schemas
+                if isinstance(schema, dict) and schema.get("name")
+            }
+            surface = context.get("provider_tool_surface", {})
+            scope = surface.get("scope", {}) if isinstance(surface, dict) else {}
+            workspace = context.get("vibecad_workspace", {})
+            request = context.get("vibecad_request", {})
+            document_management = sorted(tool_names.intersection(DOCUMENT_MANAGEMENT_TOOLS))
+            return {
+                "label": label,
+                "phase": normalize_phase(phase),
+                "approved_intent": bool(approved),
+                "entered_workspace": entered_workspace,
+                "scope": dict(scope) if isinstance(scope, dict) else {},
+                "workspace": dict(workspace) if isinstance(workspace, dict) else {},
+                "request": dict(request) if isinstance(request, dict) else {},
+                "tool_count": len(tool_names),
+                "tool_names": sorted(tool_names),
+                "document_management_tools": document_management,
+                "geometry_write_tools": geometry_write_tool_names(tool_names),
+            }
+
+        samples: dict[str, dict[str, Any]] = {
+            "intent": sample_surface("intent", "intent", approved=False),
+            "design_unapproved_gate": sample_surface(
+                "design_unapproved_gate",
+                "design",
+                approved=False,
+            ),
+            "design_planner": sample_surface("design_planner", "design", approved=True),
+            "design_partdesign_workspace": sample_surface(
+                "design_partdesign_workspace",
+                "design",
+                approved=True,
+                entered_workspace="PartDesignWorkbench",
+            ),
+            "design_rejects_assembly_workspace": sample_surface(
+                "design_rejects_assembly_workspace",
+                "design",
+                approved=True,
+                entered_workspace="AssemblyWorkbench",
+            ),
+            "assembly_assembly_workspace": sample_surface(
+                "assembly_assembly_workspace",
+                "assembly",
+                approved=True,
+                entered_workspace="AssemblyWorkbench",
+            ),
+            "modify_existing_partdesign_workspace": sample_surface(
+                "modify_existing_partdesign_workspace",
+                "design",
+                approved=True,
+                entered_workspace="PartDesignWorkbench",
+                prompt="optimize this model",
+                synthetic_object_count=1,
+            ),
+            "modify_existing_part_workspace": sample_surface(
+                "modify_existing_part_workspace",
+                "design",
+                approved=True,
+                entered_workspace="PartWorkbench",
+                prompt="fix this model",
+                synthetic_object_count=1,
+            ),
+        }
+        for phase in ("assembly", "analysis", "manufacturing"):
+            samples[f"{phase}_planner"] = sample_surface(
+                f"{phase}_planner",
+                phase,
+                approved=True,
+            )
+
+        intent_names = set(samples["intent"]["tool_names"])
+        design_gate_names = set(samples["design_unapproved_gate"]["tool_names"])
+        planner_names = set(samples["design_planner"]["tool_names"])
+        design_workspace_names = set(samples["design_partdesign_workspace"]["tool_names"])
+        disallowed_names = set(samples["design_rejects_assembly_workspace"]["tool_names"])
+        assembly_names = set(samples["assembly_assembly_workspace"]["tool_names"])
+        modify_existing_names = set(samples["modify_existing_partdesign_workspace"]["tool_names"])
+        modify_existing_part_names = set(samples["modify_existing_part_workspace"]["tool_names"])
+
+        add_gate(
+            "intent_surface_has_no_geometry_or_document_lifecycle_tools",
+            not samples["intent"]["geometry_write_tools"]
+            and not samples["intent"]["document_management_tools"]
+            and "intent.update_brief" in intent_names,
+            {
+                "geometry_write_tools": samples["intent"]["geometry_write_tools"],
+                "document_management_tools": samples["intent"]["document_management_tools"],
+                "required_tool_present": "intent.update_brief" in intent_names,
+            },
+        )
+        add_gate(
+            "downstream_phases_require_approved_intent_before_authoring",
+            samples["design_unapproved_gate"]["scope"].get("phase") == "intent_gate_required"
+            and not samples["design_unapproved_gate"]["geometry_write_tools"]
+            and "intent.update_brief" in design_gate_names,
+            {
+                "scope": samples["design_unapproved_gate"]["scope"],
+                "geometry_write_tools": samples["design_unapproved_gate"]["geometry_write_tools"],
+            },
+        )
+        add_gate(
+            "approved_phase_starts_with_planner_not_geometry_tools",
+            samples["design_planner"]["scope"].get("phase") == "design_workspace_planner"
+            and "core.enter_workspace" in planner_names
+            and not samples["design_planner"]["geometry_write_tools"]
+            and "partdesign.create_body" not in planner_names,
+            {
+                "scope": samples["design_planner"]["scope"],
+                "has_enter_workspace": "core.enter_workspace" in planner_names,
+                "geometry_write_tools": samples["design_planner"]["geometry_write_tools"],
+            },
+        )
+        add_gate(
+            "entered_design_workspace_exposes_useful_part_design_tools",
+            {
+                "partdesign.create_body",
+                "partdesign.create_sketch",
+                "partdesign.pad_sketch",
+                "sketcher.add_hole_pattern",
+            }.issubset(design_workspace_names)
+            and "intent.update_brief" not in design_workspace_names,
+            {
+                "required_present": sorted(
+                    {
+                        "partdesign.create_body",
+                        "partdesign.create_sketch",
+                        "partdesign.pad_sketch",
+                        "sketcher.add_hole_pattern",
+                    }.intersection(design_workspace_names)
+                ),
+                "intent_update_visible": "intent.update_brief" in design_workspace_names,
+            },
+        )
+        add_gate(
+            "disallowed_workspace_does_not_expose_wrong_phase_tools",
+            samples["design_rejects_assembly_workspace"]["scope"].get("phase")
+            == "design_workspace_planner"
+            and "assembly.create_assembly" not in disallowed_names
+            and samples["design_rejects_assembly_workspace"]["workspace"].get("blocked_workspace")
+            == "AssemblyWorkbench",
+            {
+                "scope": samples["design_rejects_assembly_workspace"]["scope"],
+                "blocked_workspace": samples["design_rejects_assembly_workspace"]["workspace"].get("blocked_workspace"),
+                "assembly_create_visible": "assembly.create_assembly" in disallowed_names,
+            },
+        )
+        add_gate(
+            "assembly_phase_keeps_assembly_tools_in_assembly_workspace",
+            {"assembly.create_assembly", "assembly.add_component"}.issubset(assembly_names),
+            {
+                "required_present": sorted(
+                    {"assembly.create_assembly", "assembly.add_component"}.intersection(assembly_names)
+                )
+            },
+        )
+        document_leaks = {
+            label: sample["document_management_tools"]
+            for label, sample in samples.items()
+            if sample["document_management_tools"]
+        }
+        add_gate(
+            "document_lifecycle_tools_hidden_from_all_phase_surfaces",
+            not document_leaks,
+            document_leaks,
+        )
+        audit_missing = [
+            label for label, sample in samples.items()
+            if "phase.audit_workflow" not in set(sample["tool_names"])
+        ]
+        add_gate(
+            "workflow_audit_tool_visible_on_phase_surfaces",
+            not audit_missing,
+            {"missing_from": audit_missing},
+        )
+        hidden_modify_tools = set(
+            samples["modify_existing_partdesign_workspace"]["request"].get("hidden_provider_tools", [])
+        )
+        hidden_part_modify_tools = set(
+            samples["modify_existing_part_workspace"]["request"].get("hidden_provider_tools", [])
+        )
+        add_gate(
+            "modify_existing_request_hides_replacement_entry_points",
+            "partdesign.create_body" not in modify_existing_names
+            and "part.create_primitive" not in modify_existing_names
+            and "partdesign.create_sketch" in modify_existing_names
+            and "partdesign.create_body" in hidden_modify_tools,
+            {
+                "hidden_provider_tools": sorted(hidden_modify_tools),
+                "replacement_entrypoints_hidden": sorted(
+                    set(PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS).intersection(hidden_modify_tools)
+                ),
+                "partdesign_create_sketch_visible": "partdesign.create_sketch" in modify_existing_names,
+            },
+        )
+        add_gate(
+            "modify_existing_request_keeps_in_place_correction_tools",
+            "part.create_primitive" not in modify_existing_part_names
+            and "core.delete_object" not in modify_existing_part_names
+            and "part.set_primitive_dimensions" in modify_existing_part_names
+            and "part.apply_fillet" in modify_existing_part_names
+            and "part.create_primitive" in hidden_part_modify_tools,
+            {
+                "hidden_provider_tools": sorted(hidden_part_modify_tools),
+                "part_set_dimensions_visible": "part.set_primitive_dimensions" in modify_existing_part_names,
+                "part_apply_fillet_visible": "part.apply_fillet" in modify_existing_part_names,
+            },
+        )
+
+        failures = [gate for gate in gates if not gate["passed"]]
+        return {
+            "ok": not failures,
+            "schema": "vibecad-phase-workflow-audit-v1",
+            "active_phase": normalize_phase(str(base_context.get("active_phase") or "intent")),
+            "active_workbench": active_workbench,
+            "intent_approved": bool(
+                isinstance(base_context.get("intent"), dict)
+                and base_context["intent"].get("approved")
+            ),
+            "gates": gates,
+            "failures": failures,
+            "surface_samples": samples,
+            "next_action": (
+                "Phase workflow tool boundaries are intact."
+                if not failures
+                else "Fix failed gates before trusting autonomous provider context for CAD authoring."
+            ),
+        }
+
+    def queue_steering_message(self, text: str, source: str = "user") -> dict[str, Any]:
+        clean = str(text or "").strip()
+        if not clean:
+            return {"ok": False, "error": "Steering message cannot be empty."}
+        self._steering_sequence += 1
+        entry = {
+            "id": self._steering_sequence,
+            "source": str(source or "user"),
+            "text": clean,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "consumed": False,
+        }
+        self._steering_messages.append(entry)
+        self._steering_messages = self._steering_messages[-40:]
+        return {"ok": True, "message": entry}
+
+    def consume_steering_messages(self) -> list[dict[str, Any]]:
+        pending = [
+            item
+            for item in self._steering_messages
+            if isinstance(item, dict) and not item.get("consumed")
+        ]
+        for item in pending:
+            item["consumed"] = True
+            item["consumed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return [dict(item) for item in pending]
+
+    def steering_state(self) -> dict[str, Any]:
+        return {
+            "queued_count": len([item for item in self._steering_messages if not item.get("consumed")]),
+            "messages": [dict(item) for item in self._steering_messages[-20:]],
+        }
+
     def _conversation_scope(self) -> dict[str, Any]:
         doc = self._active_document()
         if doc is not None:
@@ -1721,22 +2210,26 @@ class VibeCADService:
                 "document": str(getattr(doc, "Name", "")),
                 "file_path": None,
                 "path": str(
-                    Path(tempfile.gettempdir())
-                    / f"vibecad-{self._local_session_id}"
+                    _vibecad_user_data_dir()
+                    / "conversations"
+                    / f"unsaved-{self._local_session_id}"
                     / f"{name}.vibecad-chat.json"
                 ),
-                "persistent": False,
+                "persistent": True,
+                "document_saved": False,
             }
         return {
             "kind": "no_document",
             "document": None,
             "file_path": None,
             "path": str(
-                Path(tempfile.gettempdir())
-                / f"vibecad-{self._local_session_id}"
+                _vibecad_user_data_dir()
+                / "conversations"
+                / f"session-{self._local_session_id}"
                 / "freecad.vibecad-chat.json"
             ),
-            "persistent": False,
+            "persistent": True,
+            "document_saved": False,
         }
 
     def _conversation_path(self) -> Path:
@@ -1785,6 +2278,43 @@ class VibeCADService:
         except Exception:
             pass
 
+    @staticmethod
+    def conversation_path_for_document_file(file_path: str | Path) -> Path:
+        path = Path(str(file_path))
+        return path.with_name(f"{path.name}.vibecad-chat.json")
+
+    @staticmethod
+    def _clean_conversation_turns(conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cleaned: list[dict[str, Any]] = []
+        for item in conversation:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = str(item.get("content", "")).strip()
+            if role not in {"user", "assistant", "system"} or not content:
+                continue
+            turn = dict(item)
+            turn["role"] = role
+            turn["content"] = content
+            cleaned.append(turn)
+        return cleaned[-MAX_CONVERSATION_TURNS:]
+
+    def write_conversation_for_document_file(
+        self,
+        file_path: str | Path,
+        conversation: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        path = self.conversation_path_for_document_file(file_path)
+        cleaned = self._clean_conversation_turns(conversation)
+        self._conversation_cache = cleaned
+        self._conversation_cache_key = str(path)
+        self._write_conversation(path, cleaned)
+        return {
+            "path": str(path),
+            "turn_count": len(cleaned),
+            "conversation": cleaned,
+        }
+
     def conversation_history(self) -> dict[str, Any]:
         scope = self._conversation_scope()
         path, conversation = self._load_conversation_for_active_document()
@@ -1807,9 +2337,26 @@ class VibeCADService:
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"Unsupported conversation role: {role}")
         path, conversation = self._load_conversation_for_active_document()
+        clean_content = str(content).strip()
+        if not clean_content:
+            return self.conversation_history()
+        if conversation:
+            if role == "user":
+                for previous in reversed(conversation):
+                    previous_role = previous.get("role")
+                    if previous_role == "assistant":
+                        break
+                    if (
+                        previous_role == "user"
+                        and str(previous.get("content", "")).strip() == clean_content
+                    ):
+                        return self.conversation_history()
+            latest = conversation[-1]
+            if latest.get("role") == role and str(latest.get("content", "")).strip() == clean_content:
+                return self.conversation_history()
         entry: dict[str, Any] = {
             "role": role,
-            "content": str(content),
+            "content": clean_content,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         if provider:
@@ -1830,12 +2377,20 @@ class VibeCADService:
 
     def clear_local_session(self) -> dict[str, Any]:
         cleared = self._approvals.clear()
+        self._steering_messages.clear()
         result = self._registry.call("core.clear_local_session")
         result.update(cleared)
         return result
 
-    def tool_shape_report(self, workbench: str | None = None) -> dict[str, Any]:
+    def tool_shape_report(
+        self,
+        workbench: str | None = None,
+        *,
+        full_workspace: bool = False,
+    ) -> dict[str, Any]:
         kwargs = {"workbench": workbench} if workbench else {}
+        if full_workspace:
+            kwargs["full_workspace"] = True
         return self._registry.call("core.get_tool_shape_report", **kwargs)
 
     def report_tool_shape_gap(
@@ -1870,6 +2425,28 @@ class VibeCADService:
             "tool_count": len(tools),
             "tools": tools,
         }
+
+    def provider_phase_tool_surface(
+        self,
+        workbench: str | None = None,
+        entered_workspace: str | None = None,
+    ) -> dict[str, Any]:
+        from VibeCADSession import _apply_phase_provider_surface
+
+        active = workbench if workbench is not None else self.active_workbench_name()
+        context = self.provider_context_summary()
+        phase_context = self.phase_context()
+        _apply_phase_provider_surface(
+            self,
+            context,
+            active,
+            phase_context=phase_context,
+            entered_workspace=entered_workspace,
+        )
+        surface = context.get("provider_tool_surface")
+        if isinstance(surface, dict):
+            return surface
+        return self.provider_tool_surface(active)
 
     def is_provider_tool_available(
         self,
@@ -2458,6 +3035,9 @@ class VibeCADService:
                 "allow_primitive_provider_tools": self.allow_primitive_provider_tools(),
             },
             "workbench": self.active_workbench_name(),
+            "vibecad_project": self.phase_context(),
+            "phase_validation": self.validate_phase_document(),
+            "human_steering": self.steering_state(),
             "document": self.document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
@@ -2519,6 +3099,9 @@ class VibeCADService:
                 "allow_primitive_provider_tools": self.allow_primitive_provider_tools(),
             },
             "workbench": active_workbench,
+            "vibecad_project": self.phase_context(),
+            "phase_validation": self.validate_phase_document(),
+            "human_steering": self.steering_state(),
             "document": self.document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),

@@ -46,6 +46,8 @@
 
 #include <QLoggingCategory>
 #include <fmt/format.h>
+#include <cstdlib>
+#include <cstring>
 #include <list>
 #include <ranges>
 
@@ -2625,11 +2627,64 @@ void runEventLoop(GUISingleApplication& mainApp)
         throw;
     }
 }
+
+#if defined(FC_OS_LINUX) || defined(FC_OS_BSD)
+bool hasNonEmptyEnv(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0';
+}
+
+bool envEquals(const char* name, const char* expected)
+{
+    const char* value = std::getenv(name);
+    return value && std::strcmp(value, expected) == 0;
+}
+
+void selectRemoteDesktopOpenGLPlatform()
+{
+    if (hasNonEmptyEnv("QT_QPA_PLATFORM")) {
+        return;
+    }
+
+    if (!hasNonEmptyEnv("WAYLAND_DISPLAY") || !hasNonEmptyEnv("DISPLAY")) {
+        return;
+    }
+
+    // Remote Wayland desktop sessions commonly expose a working Xwayland/GLX
+    // llvmpipe context while EGL device probing fails. FreeCAD/Coin3D needs a
+    // current OpenGL compatibility context more than it needs native Wayland,
+    // so prefer Qt's XCB platform when both backends are available. Users and
+    // packagers can still override this by setting QT_QPA_PLATFORM explicitly.
+    setenv("QT_QPA_PLATFORM", "xcb", 0);
+    Base::Console().log(
+        "Init: Wayland and X11 displays are both available; selecting Qt XCB "
+        "platform so Coin3D uses the GLX OpenGL path.\n"
+    );
+}
+
+bool shouldUseCoinEgl()
+{
+    if (QGuiApplication::platformName() != QStringLiteral("wayland")) {
+        return false;
+    }
+
+    if (hasNonEmptyEnv("COIN_EGL")) {
+        return envEquals("COIN_EGL", "1");
+    }
+
+    return true;
+}
+#endif
 }  // namespace
 
 void Application::runApplication()
 {
     StartupProcess::setupApplication();
+
+#if defined(FC_OS_LINUX) || defined(FC_OS_BSD)
+    selectRemoteDesktopOpenGLPlatform();
+#endif
 
     {
         QSurfaceFormat defaultFormat;
@@ -2665,7 +2720,7 @@ void Application::runApplication()
 #if (COIN_MAJOR_VERSION * 100 + COIN_MINOR_VERSION * 10 + COIN_MICRO_VERSION < 406) \
     && (defined(FC_OS_LINUX) || defined(FC_OS_BSD))
     // If QT is running with native Wayland then inform Coin to use EGL
-    if (QGuiApplication::platformName() == QString::fromStdString("wayland")) {
+    if (shouldUseCoinEgl()) {
         setenv("COIN_EGL", "1", 1);
     }
 #endif

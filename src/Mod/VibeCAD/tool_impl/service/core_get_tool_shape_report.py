@@ -10,7 +10,14 @@ from VibeCADTools import SafetyLevel
 TOOL_SPEC = {'description': 'Explain provider-visible VibeCAD tools, capability coverage, and '
                 'missing CAD tool classes that can make results too primitive.',
  'name': 'core.get_tool_shape_report',
- 'parameters': {'properties': {'workbench': {'description': 'Optional workbench name. '
+ 'parameters': {'properties': {'full_workspace': {'description': 'When true, report '
+                                                                 'the full provider-safe '
+                                                                 'surface for the '
+                                                                 'workspace instead of '
+                                                                 'the legacy contract '
+                                                                 'allowlist.',
+                                                  'type': 'boolean'},
+                               'workbench': {'description': 'Optional workbench name. '
                                                             'Defaults to the active '
                                                             'workbench.',
                                              'type': 'string'}},
@@ -23,10 +30,16 @@ def run(service, **kwargs):
     from . import core_list_active_workbench_commands
 
     active = kwargs.get("workbench") or _active_workbench_name()
+    apply_workbench_allowlist = not bool(kwargs.get("full_workspace"))
     provider_tools = [
         service.registry.get(name).to_schema(active_workbench=active)
         for name in service.registry.names()
-        if is_provider_safe_tool(service, name, active)
+        if is_provider_safe_tool(
+            service,
+            name,
+            active,
+            apply_workbench_allowlist=apply_workbench_allowlist,
+        )
     ]
     provider_names = {tool["name"] for tool in provider_tools}
     all_registered = [service.registry.get(name) for name in service.registry.names()]
@@ -107,6 +120,7 @@ def run(service, **kwargs):
     ]
     return {
         "active_workbench": active,
+        "full_workspace": not apply_workbench_allowlist,
         "tool_pack_enabled": service.is_workbench_tool_pack_enabled(active),
         "provider_tool_count": len(provider_tools),
         "provider_tools": provider_tools,

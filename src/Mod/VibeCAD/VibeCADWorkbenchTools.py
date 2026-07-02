@@ -130,7 +130,11 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         "parametric solid features",
         (
             "Prefer the same feature flow a human would use: create or reuse a Body, "
-            "create constrained sketches, then create PartDesign features such as Pad."
+            "create constrained sketches, then create PartDesign features such as Pad. "
+            "When the document has no model yet, start by creating the document/body "
+            "and a deliberate base sketch instead of enumerating tools. Add only the "
+            "feature operations the design needs, then inspect solver/profile state "
+            "and the resulting solid before completion."
         ),
         ("PartDesign_", "Sketcher_"),
         ("PartDesign::", "Sketcher::SketchObject"),

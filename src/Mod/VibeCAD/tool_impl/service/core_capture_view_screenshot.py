@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import re
 import time
 
 
-TOOL_SPEC = {'description': 'Capture the active FreeCAD viewport to a temporary PNG and return '
+TOOL_SPEC = {'description': 'Capture the active FreeCAD viewport to a durable project PNG and return '
                 'redacted metadata.',
  'name': 'core.capture_view_screenshot',
  'safety': 'VIEW'}
@@ -24,9 +26,10 @@ def run(service, **kwargs):
         return result
 
     try:
-        temp_dir = Path("/tmp") / "vibecad-screenshots"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        path = temp_dir / f"vibecad-view-{int(time.time() * 1000)}.png"
+        screenshot_dir = _screenshot_artifact_dir(service)
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        document_name = _slug(_active_document_name(App) or "view")
+        path = screenshot_dir / f"{document_name}-{int(time.time() * 1000)}.png"
         view = Gui.ActiveDocument.ActiveView if Gui.ActiveDocument else None
         if view is None:
             result = {
@@ -53,6 +56,7 @@ def run(service, **kwargs):
             "size": [1280, 900],
             "format": "png",
             "background": "White",
+            "artifact_role": "visual_verification",
             "workbench": _active_workbench_name(Gui),
             "document": _active_document_name(App),
         }
@@ -76,6 +80,28 @@ def _active_workbench_name(gui):
     except Exception:
         pass
     return None
+
+
+def _screenshot_artifact_dir(service) -> Path:
+    try:
+        phase_context = service.phase_context()
+    except Exception:
+        phase_context = {}
+    root = phase_context.get("root") if isinstance(phase_context, dict) else None
+    if root:
+        return Path(str(root)).expanduser() / "artifacts" / "screenshots"
+    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser() / "artifacts" / "screenshots"
+    try:
+        return Path.home() / ".vibecad" / "artifacts" / "screenshots"
+    except Exception:
+        return Path.cwd() / ".vibecad" / "artifacts" / "screenshots"
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
+    return slug[:64] or "view"
 
 
 def _active_document_name(app):

@@ -55,6 +55,8 @@
 #include <Inventor/scxml/SoScXMLStateMachine.h>
 #include <Inventor/C/glue/gl.h>
 
+#include <Base/Console.h>
+
 #include "ContextMenu.h"
 #include "NativeEvent.h"
 #include "QuarterP.h"
@@ -170,20 +172,31 @@ QuarterWidgetP::removeFromCacheContext(QuarterWidgetP_cachecontext * context, co
     for (int i = 0; i < cachecontext_list->getLength(); i++) {
       if ((*cachecontext_list)[i] == context) {
         QOpenGLContext* glcontext = widget->context();
+        bool contextIsCurrent = false;
         if (glcontext) {
           // set the context while calling destructingContext() (might trigger OpenGL calls)
           if (glcontext->isValid()) {
             const_cast<QOpenGLWidget*> (widget)->makeCurrent();
+            contextIsCurrent = QOpenGLContext::currentContext() == glcontext;
           }
-          // fetch the cc_glglue context instance as a workaround for a bug fixed in Coin r12818
-          (void) cc_glglue_instance(context->id);
+          if (!contextIsCurrent) {
+            Base::Console().warning(
+              "QuarterWidget: OpenGL context could not be made current while "
+              "destroying a Coin cache context; skipping GL resource cleanup "
+              "for this context to avoid a Coin3D assertion.\n"
+            );
+          }
+          else {
+            // fetch the cc_glglue context instance as a workaround for a bug fixed in Coin r12818
+            (void) cc_glglue_instance(context->id);
+          }
         }
         cachecontext_list->removeFast(i);
-        SoContextHandler::destructingContext(context->id);
-        if (glcontext) {
-          if (glcontext->isValid()) {
+        if (contextIsCurrent) {
+          SoContextHandler::destructingContext(context->id);
+        }
+        if (glcontext && contextIsCurrent) {
             const_cast<QOpenGLWidget*> (widget)->doneCurrent();
-          }
         }
         delete context;
         return;
@@ -357,4 +370,3 @@ QuarterWidgetP::nativeEventFilter(void * message, long * result)
 
   return false;
 }
-

@@ -12,7 +12,9 @@ from typing import Any, Callable
 
 from VibeCADCore import VibeCADService, get_service
 from VibeCADProvider import BaseProvider, OfflineProvider, OpenAIAgentsProvider, ProviderUnavailable
+from VibeCADProject import PHASE_SPECS, normalize_phase
 from VibeCADTools import SafetyLevel
+from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
 MAX_AUTONOMOUS_PROVIDER_TURNS: int | None = None
 MAX_AUTONOMOUS_PROVIDER_SECONDS: float | None = None
@@ -22,6 +24,7 @@ MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV = (
 )
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancellationCheck = Callable[[], bool]
+SteeringCheck = Callable[[], list[str]]
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "core.open_document",
     "core.delete_object",
     "core.report_tool_shape_gap",
+    "phase.set_current",
+    "intent.update_brief",
     "partdesign.create_body",
     "partdesign.create_sketch",
     "partdesign.create_datum_plane",
@@ -101,6 +106,7 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "sketcher.add_point",
     "sketcher.add_polyline",
     "sketcher.add_circle",
+    "sketcher.add_hole_pattern",
     "sketcher.add_arc",
     "sketcher.add_ellipse",
     "sketcher.add_bspline",
@@ -144,6 +150,11 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "sketcher.set_construction",
 }
 
+DOCUMENT_MANAGEMENT_TOOLS = {
+    "core.create_new_document",
+    "core.open_document",
+}
+
 PROVIDER_PRIMITIVE_WRITE_TOOLS = {
     "part.create_primitive",
     "part.set_placement",
@@ -152,6 +163,12 @@ PROVIDER_PRIMITIVE_WRITE_TOOLS = {
     "part.apply_fillet",
     "part.apply_chamfer",
     "part.apply_thickness",
+}
+
+PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS = {
+    "core.delete_object",
+    "part.create_primitive",
+    "partdesign.create_body",
 }
 
 PROVIDER_QUEUE_TOOLS = {
@@ -168,11 +185,37 @@ CORE_PROVIDER_TOOLS = {
     "core.get_report_view_errors",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
+    "phase.get_project_context",
+    "phase.set_current",
+    "phase.validate_document",
+    "phase.audit_workflow",
+    "core.enter_workspace",
     "core.activate_workbench",
     "core.get_object_properties",
-    "core.create_new_document",
-    "core.open_document",
     "core.delete_object",
+}
+
+PROVIDER_WORKSPACE_CONTROL_TOOLS = {
+    "core.get_active_document",
+    "core.get_selection",
+    "core.get_view_state",
+    "core.get_task_panel",
+    "core.capture_view_screenshot",
+    "core.get_report_view_errors",
+    "core.list_workbenches",
+    "core.get_active_workbench_tool_pack",
+    "core.list_workbench_tool_packs",
+    "core.list_workbench_object_templates",
+    "core.list_workbench_objects",
+    "core.get_object_properties",
+    "core.get_tool_shape_report",
+    "core.report_tool_shape_gap",
+    "phase.get_project_context",
+    "phase.set_current",
+    "phase.validate_document",
+    "phase.audit_workflow",
+    "core.enter_workspace",
+    "core.activate_workbench",
 }
 
 WORKBENCH_READ_TOOLS = {
@@ -184,24 +227,19 @@ WORKBENCH_READ_TOOLS = {
     "MaterialWorkbench": {"material.get_objects"},
 }
 
-SKETCHER_PARTDESIGN_BRIDGE_TOOLS = {
-    "partdesign.pad_sketch",
-    "partdesign.pocket_sketch",
-    "partdesign.revolve_sketch",
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-}
-
 PROVIDER_CONTEXT_CORE_TOOLS = {
     "core.get_active_document",
     "core.capture_view_screenshot",
     "core.get_report_view_errors",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
+    "phase.get_project_context",
+    "phase.set_current",
+    "phase.validate_document",
+    "phase.audit_workflow",
+    "core.enter_workspace",
     "core.activate_workbench",
     "core.get_object_properties",
-    "core.create_new_document",
-    "core.open_document",
     "core.delete_object",
 }
 
@@ -211,7 +249,36 @@ PROVIDER_CONTEXT_READ_TOOLS = {
     "core.get_report_view_errors",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
+    "phase.get_project_context",
+    "phase.validate_document",
+    "phase.audit_workflow",
     "core.get_object_properties",
+}
+
+PHASE_CONTROL_TOOLS = {
+    "phase.get_project_context",
+    "phase.set_current",
+    "phase.validate_document",
+    "phase.audit_workflow",
+}
+
+INTENT_PHASE_TOOLS = {
+    "core.get_active_document",
+    "core.get_selection",
+    "core.get_view_state",
+    "core.get_task_panel",
+    "core.capture_view_screenshot",
+    "core.get_report_view_errors",
+    "phase.get_project_context",
+    "phase.set_current",
+    "phase.audit_workflow",
+    "intent.update_brief",
+}
+
+NON_GEOMETRY_PROVIDER_WRITE_TOOLS = {
+    "phase.set_current",
+    "intent.update_brief",
+    "core.report_tool_shape_gap",
 }
 
 SKETCHER_INSPECT_TOOLS = {
@@ -248,6 +315,7 @@ SKETCHER_CREATE_TOOLS = {
     "sketcher.add_point",
     "sketcher.add_polyline",
     "sketcher.add_circle",
+    "sketcher.add_hole_pattern",
     "sketcher.add_arc",
     "sketcher.add_ellipse",
     "sketcher.add_bspline",
@@ -346,6 +414,7 @@ SKETCHER_MINIMAL_CREATE_TOOLS = {
     "sketcher.add_line",
     "sketcher.add_point",
     "sketcher.add_circle",
+    "sketcher.add_hole_pattern",
     "sketcher.add_arc",
     "sketcher.add_slot",
     "sketcher.draw_rectangle",
@@ -445,6 +514,7 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "sketcher.add_point",
             "sketcher.add_polyline",
             "sketcher.add_circle",
+            "sketcher.add_hole_pattern",
             "sketcher.add_arc",
             "sketcher.add_ellipse",
             "sketcher.add_bspline",
@@ -545,6 +615,7 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "sketcher.add_point",
             "sketcher.add_polyline",
             "sketcher.add_circle",
+            "sketcher.add_hole_pattern",
             "sketcher.add_arc",
             "sketcher.add_ellipse",
             "sketcher.add_bspline",
@@ -669,19 +740,28 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
 }
 
 
-def is_provider_safe_tool(service: VibeCADService, tool_name: str, workbench: str | None = None) -> bool:
+def is_provider_safe_tool(
+    service: VibeCADService,
+    tool_name: str,
+    workbench: str | None = None,
+    *,
+    apply_workbench_allowlist: bool = True,
+) -> bool:
     try:
         tool = service.registry.get(tool_name)
     except KeyError:
         return False
-    allowlist = _provider_tool_allowlist_for_workbench(workbench)
-    if allowlist is not None and tool_name not in allowlist:
+    if tool.name in DOCUMENT_MANAGEMENT_TOOLS:
         return False
+    if apply_workbench_allowlist:
+        allowlist = _provider_tool_allowlist_for_workbench(workbench)
+        if allowlist is not None and tool_name not in allowlist:
+            return False
     if tool.name in PROVIDER_QUEUE_TOOLS:
         return False
     if not is_provider_tool_kind_allowed(tool.safety, tool.name):
         return False
-    if _is_primitive_tool_blocked(service, tool.name):
+    if _is_primitive_tool_blocked(service, tool.name, workbench):
         return False
     return (
         _is_tool_available_for_provider_context(service, tool, workbench)
@@ -698,8 +778,6 @@ def _provider_tool_allowlist_for_workbench(workbench: str | None) -> set[str] | 
     allowlist = set(CORE_PROVIDER_TOOLS)
     allowlist.update(WORKBENCH_READ_TOOLS.get(workbench, set()))
     allowlist.update(str(name) for name in contract.get("preferred_tools", []) or [])
-    if workbench == "SketcherWorkbench":
-        allowlist.update(SKETCHER_PARTDESIGN_BRIDGE_TOOLS)
     return allowlist
 
 
@@ -709,7 +787,13 @@ def is_provider_tool_kind_allowed(safety: SafetyLevel, tool_name: str) -> bool:
     )
 
 
-def _is_primitive_tool_blocked(service: VibeCADService, tool_name: str) -> bool:
+def _is_primitive_tool_blocked(
+    service: VibeCADService,
+    tool_name: str,
+    workbench: str | None = None,
+) -> bool:
+    if workbench == "PartWorkbench":
+        return False
     return (
         tool_name in PROVIDER_PRIMITIVE_WRITE_TOOLS
         and not service.allow_primitive_provider_tools()
@@ -735,6 +819,7 @@ def _is_partdesign_sketcher_tool(tool_name: str) -> bool:
         "sketcher.add_point",
         "sketcher.add_polyline",
         "sketcher.add_circle",
+        "sketcher.add_hole_pattern",
         "sketcher.add_arc",
         "sketcher.add_ellipse",
         "sketcher.add_bspline",
@@ -795,22 +880,7 @@ def _is_tool_available_for_provider_context(
         return True
     if workbench == "PartDesignWorkbench" and _is_partdesign_sketcher_tool(tool.name):
         return True
-    if workbench == "SketcherWorkbench" and _is_sketcher_partdesign_feature_tool(tool.name):
-        try:
-            return bool(service.sketcher_summary().get("found"))
-        except Exception:
-            return False
     return False
-
-
-def _is_sketcher_partdesign_feature_tool(tool_name: str) -> bool:
-    return tool_name in {
-        "partdesign.pad_sketch",
-        "partdesign.pocket_sketch",
-        "partdesign.revolve_sketch",
-        "partdesign.loft_profiles",
-        "partdesign.sweep_profile",
-    }
 
 
 def choose_provider(service: VibeCADService, prefer_online: bool = True) -> BaseProvider:
@@ -853,6 +923,7 @@ def run_prompt(
     max_provider_seconds: float | None = MAX_AUTONOMOUS_PROVIDER_SECONDS,
     enforce_small_steps: bool | None = None,
     cancellation_check: CancellationCheck | None = None,
+    steering_check: SteeringCheck | None = None,
 ) -> VibeCADResponse:
     clean_prompt = prompt.strip()
     if not clean_prompt:
@@ -860,14 +931,16 @@ def run_prompt(
 
     active_service = service or get_service()
     _emit_progress(progress_callback, {"event": "context_build_started"})
+    entered_workspace: str | None = None
     active_workbench = active_service.active_workbench_name()
-    provider_workbench = _effective_provider_workbench(active_service, active_workbench)
     context = active_service.provider_context_summary()
-    _apply_effective_provider_workbench(
+    context["vibecad_request"] = _request_policy(clean_prompt, context)
+    phase_context = active_service.phase_context()
+    _apply_phase_provider_surface(
         active_service,
         context,
         active_workbench,
-        provider_workbench,
+        phase_context=phase_context,
     )
     tool_trace: list[dict[str, Any]] = []
     visual_feedback_consumed = _context_has_satisfied_screenshot(context)
@@ -884,6 +957,7 @@ def run_prompt(
             "event": "context_build_completed",
             "workbench": context.get("workbench"),
             "active_workbench": active_workbench,
+            "workspace_mode": context.get("vibecad_workspace", {}).get("mode"),
             "provider_tool_count": len(context["provider_tool_schemas"]),
             "next_step": context["vibecad_loop"]["next_step"],
             "remaining_outcomes": context["vibecad_loop"]["remaining_outcomes"],
@@ -898,15 +972,18 @@ def run_prompt(
     )
     tool_runner = make_provider_tool_runner(
         active_service,
-        provider_workbench,
+        entered_workspace,
         tool_trace=tool_trace,
         progress_callback=progress_callback,
         turn_state={} if small_step_checkpoints else None,
         cancellation_check=cancellation_check,
+        steering_check=steering_check,
+        request_policy=context.get("vibecad_request"),
     )
     started_at = time.monotonic()
 
     try:
+        _inject_human_steering(context, _consume_steering(steering_check))
         provider_prompt = _prompt_with_conversation(clean_prompt, context)
         outputs: list[str] = []
         turn_state = getattr(tool_runner, "_vibecad_turn_state", {})
@@ -942,6 +1019,17 @@ def run_prompt(
                     },
                 )
                 break
+            steering_messages = _consume_steering(steering_check)
+            if steering_messages:
+                _inject_human_steering(context, steering_messages)
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "human_steering_consumed",
+                        "message_count": len(steering_messages),
+                        "turn": turn_index + 1,
+                    },
+                )
             existing_loop_state = context.get("vibecad_loop")
             if not (
                 isinstance(existing_loop_state, dict)
@@ -1000,6 +1088,10 @@ def run_prompt(
                     "The provider made partial FreeCAD changes but did not "
                     f"return a final answer before stopping: {exc}"
                 )
+                entered_workspace = _workspace_session_from_trace(
+                    tool_trace,
+                    entered_workspace,
+                )
                 context = _refresh_provider_context(
                     active_service,
                     clean_prompt,
@@ -1007,6 +1099,7 @@ def run_prompt(
                     turn_index + 2,
                     visual_feedback_consumed,
                     previous_context=context,
+                    entered_workspace=entered_workspace,
                 )
                 if not _should_continue_autonomously(
                     clean_prompt,
@@ -1028,6 +1121,10 @@ def run_prompt(
             outputs.append(result.final_output)
             if turn_started_with_visual_feedback:
                 visual_feedback_consumed = True
+            entered_workspace = _workspace_session_from_trace(
+                tool_trace,
+                entered_workspace,
+            )
             post_turn_context = _refresh_provider_context(
                 active_service,
                 clean_prompt,
@@ -1035,9 +1132,13 @@ def run_prompt(
                 turn_index + 2,
                 visual_feedback_consumed,
                 previous_context=context,
+                entered_workspace=entered_workspace,
             )
+            post_turn_loop = post_turn_context.get("vibecad_loop", {})
             post_turn_missing = tuple(
-                _missing_requirement_lines(clean_prompt, post_turn_context, tool_trace)
+                post_turn_loop.get("remaining_outcomes", [])
+                if isinstance(post_turn_loop, dict)
+                else []
             )
             _emit_progress(
                 progress_callback,
@@ -1155,17 +1256,22 @@ def _refresh_provider_context(
     turn: int = 1,
     visual_feedback_consumed: bool = False,
     previous_context: dict[str, Any] | None = None,
+    entered_workspace: str | None = None,
 ) -> dict[str, Any]:
     active_workbench = service.active_workbench_name()
-    provider_workbench = _effective_provider_workbench(service, active_workbench)
     context = service.provider_context_summary()
-    _apply_effective_provider_workbench(
+    phase_context = service.phase_context()
+    _apply_phase_provider_surface(
         service,
         context,
         active_workbench,
-        provider_workbench,
+        phase_context=phase_context,
+        entered_workspace=entered_workspace,
     )
     if prompt is not None:
+        request_policy = _request_policy(prompt, context)
+        context["vibecad_request"] = request_policy
+        _apply_request_policy_provider_surface(service, context, request_policy)
         context["vibecad_loop"] = _provider_loop_state(
             prompt,
             context,
@@ -1177,15 +1283,504 @@ def _refresh_provider_context(
     return context
 
 
+def _apply_phase_provider_surface(
+    service: VibeCADService,
+    context: dict[str, Any],
+    active_workbench: str | None,
+    *,
+    phase_context: dict[str, Any],
+    entered_workspace: str | None = None,
+) -> None:
+    phase = _phase_name(phase_context)
+    context["vibecad_project"] = phase_context
+    if phase == "intent":
+        _apply_intent_provider_surface(service, context, active_workbench, phase_context)
+        return
+    if _phase_requires_approved_intent(phase_context) and not _phase_intent_is_approved(phase_context):
+        _apply_intent_provider_surface(
+            service,
+            context,
+            active_workbench,
+            phase_context,
+            gated_phase=phase,
+        )
+        return
+    if entered_workspace:
+        _apply_entered_workspace_provider_surface(
+            service,
+            context,
+            active_workbench,
+            entered_workspace,
+            phase_context=phase_context,
+        )
+        return
+    _apply_planner_provider_surface(
+        service,
+        context,
+        active_workbench,
+        phase_context=phase_context,
+    )
+
+
+def _apply_intent_provider_surface(
+    service: VibeCADService,
+    context: dict[str, Any],
+    active_workbench: str | None,
+    phase_context: dict[str, Any],
+    gated_phase: str | None = None,
+) -> None:
+    schemas = provider_safe_tool_schemas(
+        service,
+        None,
+        tool_names=INTENT_PHASE_TOOLS,
+        apply_workbench_allowlist=False,
+    )
+    phase = _phase_name(phase_context)
+    scope = {
+        "workbench": None,
+        "phase": "intent_briefing" if gated_phase is None else "intent_gate_required",
+        "reason": (
+            "Intent phase exposes no CAD geometry tools. Capture a complete "
+            "human-readable and machine-readable working brief before downstream phases."
+            if gated_phase is None
+            else (
+                f"The requested phase '{gated_phase}' needs a usable working intent "
+                "brief before CAD authoring tools are exposed."
+            )
+        ),
+        "active_tool_count": len(schemas),
+        "full_workbench_tool_count": len(schemas),
+        "omitted_tool_count": 0,
+        "active_tool_names": [schema["name"] for schema in schemas],
+    }
+    context["active_workbench"] = active_workbench
+    context["workbench"] = None
+    context["provider_tool_schemas"] = schemas
+    context["provider_tool_schemas_workbench"] = "intent"
+    context["provider_tool_scope"] = scope
+    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
+        service,
+        None,
+        schemas,
+        full_tool_count=len(schemas),
+        scope=scope,
+    )
+    context["tool_shape_report"] = service.tool_shape_report(active_workbench)
+    context["vibecad_workspace"] = {
+        "mode": "intent",
+        "active_workbench": active_workbench,
+        "entered_workbench": None,
+        "instruction": (
+            "Do not create geometry in Intent. Interview the user through concise "
+            "targeted questions only when critical information is missing. When enough "
+            "context exists, call intent.update_brief with structured requirements, "
+            "assumptions, open questions, acceptance criteria, readiness_score, "
+            "and ready_for_next_phase, then call phase.set_current for the phase "
+            "that should do the CAD work. Do not ask for approval just to proceed; "
+            "state reasonable assumptions and continue unless the request is "
+            "destructive, impossible, or materially ambiguous."
+        ),
+        "available_workspaces": [],
+        "active_phase": phase,
+        "gated_phase": gated_phase,
+    }
+
+
+def _apply_planner_provider_surface(
+    service: VibeCADService,
+    context: dict[str, Any],
+    active_workbench: str | None,
+    phase_context: dict[str, Any] | None = None,
+) -> None:
+    phase_context = phase_context or service.phase_context()
+    phase = _phase_name(phase_context)
+    allowed_workspaces = _phase_allowed_workbenches(phase_context)
+    schemas = provider_safe_tool_schemas(
+        service,
+        None,
+        tool_names=PROVIDER_WORKSPACE_CONTROL_TOOLS | PHASE_CONTROL_TOOLS,
+    )
+    full_active_count = len(
+        provider_safe_tool_schemas(
+            service,
+            active_workbench,
+            apply_workbench_allowlist=False,
+        )
+    )
+    scope = {
+        "workbench": None,
+        "phase": f"{phase}_workspace_planner",
+        "reason": (
+            "Small phase-native control surface. Choose one allowed workspace "
+            "explicitly with core.enter_workspace before concrete CAD authoring "
+            "tools are exposed."
+        ),
+        "active_tool_count": len(schemas),
+        "full_workbench_tool_count": full_active_count,
+        "omitted_tool_count": max(0, full_active_count - len(schemas)),
+        "active_tool_names": [schema["name"] for schema in schemas],
+    }
+    context["active_workbench"] = active_workbench
+    context["workbench"] = None
+    context["provider_tool_schemas"] = schemas
+    context["provider_tool_schemas_workbench"] = "workspace_planner"
+    context["provider_tool_scope"] = scope
+    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
+        service,
+        None,
+        schemas,
+        full_tool_count=full_active_count,
+        scope=scope,
+    )
+    context["tool_shape_report"] = service.tool_shape_report(active_workbench)
+    context["vibecad_workspace"] = {
+        "mode": "planner",
+        "active_workbench": active_workbench,
+        "entered_workbench": None,
+        "instruction": (
+            "Decide the next FreeCAD workspace from the user's goal and current "
+            "document state within the active VibeCAD phase. Do not design from "
+            "this control surface. Inspect if needed, validate the phase if "
+            "useful, then call core.enter_workspace with one allowed workbench "
+            "and your workspace-session goal."
+        ),
+        "available_workspaces": sorted(allowed_workspaces),
+        "active_phase": phase,
+        "phase_goal": _phase_spec(phase_context).get("goal"),
+    }
+
+
+def _apply_entered_workspace_provider_surface(
+    service: VibeCADService,
+    context: dict[str, Any],
+    active_workbench: str | None,
+    entered_workspace: str,
+    phase_context: dict[str, Any] | None = None,
+) -> None:
+    phase_context = phase_context or service.phase_context()
+    phase = _phase_name(phase_context)
+    workspace = entered_workspace or active_workbench
+    if workspace and not _phase_allows_workbench(phase_context, workspace):
+        _apply_planner_provider_surface(
+            service,
+            context,
+            active_workbench,
+            phase_context=phase_context,
+        )
+        context["vibecad_workspace"]["blocked_workspace"] = workspace
+        context["vibecad_workspace"]["blocked_reason"] = (
+            f"{workspace} is outside the active VibeCAD phase '{phase}'."
+        )
+        return
+    schemas = provider_safe_tool_schemas(
+        service,
+        workspace,
+        apply_workbench_allowlist=False,
+    )
+    if phase != "intent":
+        schemas = [
+            schema
+            for schema in schemas
+            if schema.get("name") != "intent.update_brief"
+        ]
+    scope = {
+        "workbench": workspace,
+        "phase": f"{phase}_entered_workspace",
+        "reason": (
+            "The model explicitly entered an allowed workspace for the active "
+            "VibeCAD phase. Expose the full useful workspace tool surface plus "
+            "phase validators."
+        ),
+        "active_tool_count": len(schemas),
+        "full_workbench_tool_count": len(schemas),
+        "omitted_tool_count": 0,
+        "active_tool_names": [schema["name"] for schema in schemas],
+    }
+    context["active_workbench"] = active_workbench
+    context["workbench"] = workspace
+    context["provider_tool_schemas"] = schemas
+    context["provider_tool_schemas_workbench"] = workspace
+    context["provider_tool_scope"] = scope
+    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
+        service,
+        workspace,
+        schemas,
+        full_tool_count=len(schemas),
+        scope=scope,
+    )
+    context["tool_shape_report"] = service.tool_shape_report(
+        workspace,
+        full_workspace=True,
+    )
+    context.update(service._provider_domain_context(workspace))
+    context["vibecad_workspace"] = {
+        "mode": "workspace",
+        "active_workbench": active_workbench,
+        "entered_workbench": workspace,
+        "instruction": _workspace_operator_instruction(workspace, phase_context),
+        "active_phase": phase,
+        "phase_goal": _phase_spec(phase_context).get("goal"),
+        "phase_success_gates": _phase_spec(phase_context).get("success_gates", []),
+    }
+
+
+def _workspace_operator_instruction(
+    workspace: str | None,
+    phase_context: dict[str, Any] | None = None,
+) -> str:
+    pack = get_tool_pack(workspace)
+    phase_context = phase_context or {}
+    phase = _phase_name(phase_context) if phase_context else "unknown"
+    spec = _phase_spec(phase_context) if phase_context else {}
+    base = (
+        "Use this workspace's concrete native tools to make the highest-quality "
+        "CAD increment you can from the user's goal. You own the design choices, "
+        "feature strategy, dimensions, naming, and whether to hand off. Use "
+        "inspection tools as needed, and call core.enter_workspace when another "
+        "workspace is the better next place to work. Stay inside the active "
+        f"VibeCAD phase '{phase}' and validate against its success gates before "
+        "claiming completion."
+    )
+    if spec.get("goal"):
+        base = f"{base} Phase goal: {spec['goal']}"
+    if pack is None:
+        return base
+    return f"{base} Workspace guidance: {pack.instructions}"
+
+
+def _phase_name(phase_context: dict[str, Any] | None) -> str:
+    try:
+        return normalize_phase(
+            str((phase_context or {}).get("active_phase") or "intent")
+        )
+    except Exception:
+        return "intent"
+
+
+def _phase_spec(phase_context: dict[str, Any] | None) -> dict[str, Any]:
+    phase = _phase_name(phase_context)
+    return dict(PHASE_SPECS.get(phase, PHASE_SPECS["intent"]))
+
+
+def _phase_allowed_workbenches(phase_context: dict[str, Any] | None) -> set[str]:
+    phase = (phase_context or {}).get("phase")
+    if isinstance(phase, dict) and isinstance(phase.get("allowed_workbenches"), list):
+        return {str(item) for item in phase["allowed_workbenches"]}
+    return {str(item) for item in _phase_spec(phase_context).get("allowed_workbenches", ())}
+
+
+def _phase_allows_workbench(
+    phase_context: dict[str, Any] | None,
+    workbench: str | None,
+) -> bool:
+    if not workbench:
+        return True
+    allowed = _phase_allowed_workbenches(phase_context)
+    return not allowed or workbench in allowed
+
+
+def _phase_intent_is_approved(phase_context: dict[str, Any] | None) -> bool:
+    intent = (phase_context or {}).get("intent", {})
+    if not isinstance(intent, dict):
+        return False
+    if intent.get("approved"):
+        return True
+    brief = intent.get("brief")
+    if isinstance(brief, dict):
+        if brief.get("ready_for_next_phase"):
+            return True
+        requirements = brief.get("requirements")
+        summary = str(brief.get("summary") or "").strip()
+        if summary and isinstance(requirements, dict) and requirements:
+            return True
+    readiness = intent.get("readiness")
+    return bool(
+        isinstance(readiness, dict)
+        and readiness.get("ready_for_next_phase")
+        and int(readiness.get("score", 0) or 0) >= 80
+    )
+
+
+def _phase_requires_approved_intent(phase_context: dict[str, Any] | None) -> bool:
+    return bool(_phase_spec(phase_context).get("requires_approved_intent"))
+
+
+def _request_policy(prompt: str, context: dict[str, Any]) -> dict[str, Any]:
+    text = f" {str(prompt or '').lower()} "
+    document = context.get("document", {}) if isinstance(context, dict) else {}
+    try:
+        object_count = int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
+    except Exception:
+        object_count = 0
+    explicit_new = any(
+        phrase in text
+        for phrase in (
+            " create a new ",
+            " make a new ",
+            " new design ",
+            " new part ",
+            " new assembly ",
+            " from scratch ",
+            " start over ",
+            " rebuild ",
+            " replace ",
+            " replacement ",
+        )
+    )
+    modify_existing = any(
+        phrase in text
+        for phrase in (
+            " this model ",
+            " this part ",
+            " this body ",
+            " this frame ",
+            " current model ",
+            " existing model ",
+            " existing part ",
+            " selected ",
+            " fix ",
+            " correct ",
+            " improve ",
+            " optimize ",
+            " optimise ",
+            " modify ",
+            " adjust ",
+            " change ",
+            " repair ",
+            " update ",
+            " add to ",
+        )
+    )
+    mode = "new_design" if explicit_new and not modify_existing else "create_or_modify"
+    preserve_existing = bool(object_count > 0 and modify_existing and not explicit_new)
+    if preserve_existing:
+        mode = "modify_existing"
+    return {
+        "mode": mode,
+        "preserve_existing_model": preserve_existing,
+        "document_object_count_at_start": object_count,
+        "explicit_new_design": explicit_new,
+        "modify_existing_language": modify_existing,
+        "instruction": (
+            "Preserve the existing active/selected model. Inspect and modify "
+            "current objects/features in place; do not create a replacement "
+            "document, replacement body, or fresh design unless the user "
+            "explicitly asks for replacement or a rebuild."
+            if preserve_existing
+            else "No existing-model preservation constraint was inferred from the prompt."
+        ),
+    }
+
+
+def _request_policy_hidden_tools(request_policy: dict[str, Any] | None) -> set[str]:
+    if not isinstance(request_policy, dict) or not request_policy.get("preserve_existing_model"):
+        return set()
+    return set(DOCUMENT_MANAGEMENT_TOOLS) | set(PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS)
+
+
+def _apply_request_policy_provider_surface(
+    service: VibeCADService,
+    context: dict[str, Any],
+    request_policy: dict[str, Any] | None,
+) -> None:
+    hidden = _request_policy_hidden_tools(request_policy)
+    if not hidden:
+        return
+
+    def filter_schemas(value: Any) -> tuple[list[dict[str, Any]], set[str]]:
+        if not isinstance(value, list):
+            return [], set()
+        kept: list[dict[str, Any]] = []
+        removed: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if name in hidden:
+                removed.add(name)
+                continue
+            kept.append(item)
+        return kept, removed
+
+    filtered_schemas, removed_from_context = filter_schemas(context.get("provider_tool_schemas"))
+    if isinstance(context.get("provider_tool_schemas"), list):
+        context["provider_tool_schemas"] = filtered_schemas
+
+    surface = context.get("provider_tool_surface")
+    removed_from_surface: set[str] = set()
+    if isinstance(surface, dict):
+        surface_tools, removed_from_surface = filter_schemas(surface.get("tools"))
+        surface["tools"] = surface_tools
+        surface["tool_count"] = len(surface_tools)
+
+    removed = sorted(removed_from_context | removed_from_surface)
+    if not removed:
+        return
+
+    request_policy["hidden_provider_tools"] = removed
+    request_policy["hidden_provider_tool_policy"] = (
+        "The user request refers to the existing model, so replacement-body, "
+        "new primitive, destructive delete, and document lifecycle tools are "
+        "hidden from this model-visible tool surface."
+    )
+
+    def update_scope(scope: Any) -> None:
+        if not isinstance(scope, dict):
+            return
+        names = [
+            str(name)
+            for name in scope.get("active_tool_names", [])
+            if str(name) not in hidden
+        ]
+        scope["active_tool_names"] = names
+        scope["active_tool_count"] = len(names)
+        try:
+            omitted = int(scope.get("omitted_tool_count", 0) or 0)
+        except Exception:
+            omitted = 0
+        scope["omitted_tool_count"] = omitted + len(removed)
+        scope["request_filter"] = {
+            "preserve_existing_model": True,
+            "hidden_tool_names": removed,
+        }
+
+    update_scope(context.get("provider_tool_scope"))
+    if isinstance(surface, dict):
+        update_scope(surface.get("scope"))
+
+
+def _workspace_session_from_trace(
+    tool_trace: list[dict[str, Any]],
+    current_workspace: str | None,
+) -> str | None:
+    workspace = current_workspace
+    for item in tool_trace:
+        if not isinstance(item, dict) or not item.get("ok"):
+            continue
+        tool_name = str(item.get("tool_name") or "")
+        if tool_name not in {"core.enter_workspace", "core.activate_workbench"}:
+            continue
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        required_next = result.get("required_next_action")
+        if isinstance(required_next, dict) and required_next.get("next_turn_workbench"):
+            workspace = str(required_next["next_turn_workbench"])
+            continue
+        for key in ("active_workbench", "workspace", "workbench"):
+            if result.get(key):
+                workspace = str(result[key])
+                break
+        if workspace is None and item.get("active_workbench"):
+            workspace = str(item["active_workbench"])
+    return workspace
+
+
 def _effective_provider_workbench(
     service: VibeCADService,
     active_workbench: str | None,
 ) -> str | None:
-    if active_workbench != "SketcherWorkbench":
-        return active_workbench
-    if not _active_sketch_is_partdesign_body_member(service):
-        return active_workbench
-    return "PartDesignWorkbench"
+    return active_workbench
 
 
 def _active_sketch_is_partdesign_body_member(service: VibeCADService) -> bool:
@@ -1356,8 +1951,7 @@ def _sketcher_tool_scope_for_context(
         tool_names=PROVIDER_CONTEXT_CORE_TOOLS
         | SKETCHER_INSPECT_TOOLS
         | SKETCHER_EDIT_TOOLS
-        | SKETCHER_CONSTRAINT_TOOLS
-        | SKETCHER_PARTDESIGN_BRIDGE_TOOLS,
+        | SKETCHER_CONSTRAINT_TOOLS,
     )
 
 
@@ -1504,7 +2098,16 @@ def _provider_loop_state(
     visual_feedback_consumed: bool,
     previous_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    remaining = _missing_requirement_lines(prompt, context, tool_trace)
+    validation_notes = _missing_requirement_lines(prompt, context, tool_trace)
+    remaining: list[str] = list(validation_notes)
+    workspace_state = context.get("vibecad_workspace", {}) if isinstance(context, dict) else {}
+    project_state = context.get("vibecad_project") if isinstance(context, dict) else None
+    phase = _phase_name(project_state) if isinstance(project_state, dict) else "unknown"
+    workspace_mode = (
+        str(workspace_state.get("mode") or "")
+        if isinstance(workspace_state, dict)
+        else ""
+    )
     recent_trace = [
         {
             "tool_name": item.get("tool_name"),
@@ -1527,10 +2130,19 @@ def _provider_loop_state(
     return {
         "turn": max(1, int(turn)),
         "mode": "autonomous_cad_operator",
+        "active_phase": phase,
+        "phase_validation": _phase_validation_from_context(context),
+        "workspace_mode": workspace_mode,
         "execution_contract": _execution_contract_for_context(context),
         "max_mutating_tool_calls_per_turn": _max_mutating_tool_calls_per_provider_turn(),
-        "next_step": _next_loop_step(remaining, object_count, bool(recent_trace)),
+        "next_step": _next_loop_step(
+            remaining,
+            object_count,
+            bool(recent_trace),
+            workspace_mode=workspace_mode,
+        ),
         "remaining_outcomes": remaining,
+        "state_validation_notes": validation_notes,
         "recent_tool_trace": recent_trace,
         "document_delta": _document_delta(previous_context, context),
         "document_object_count": object_count,
@@ -1538,11 +2150,11 @@ def _provider_loop_state(
         "screenshot_captured": bool(isinstance(screenshot, dict) and screenshot.get("captured")),
         "visual_attention_flags": attention_flags,
         "instruction": (
-            "Take one or a small set of intentional FreeCAD actions, inspect the "
-            "returned state, and continue until remaining_outcomes is empty. "
-            "The parent loop will checkpoint after a bounded number of mutating "
-            "tool calls so state can be inspected before more edits. "
-            "Do not ask the user unless the next action is impossible or destructive."
+            "Use the current workspace mode. In planner mode, choose a workspace "
+            "with core.enter_workspace. In workspace mode, use the exposed native "
+            "tools to make the best CAD increment you can. state_validation_notes "
+            "are observations, not deterministic instructions. The parent loop "
+            "will checkpoint after bounded mutations or workspace handoffs."
         ),
     }
 
@@ -1550,10 +2162,19 @@ def _provider_loop_state(
 def _execution_contract_for_context(context: dict[str, Any]) -> dict[str, Any]:
     workbench = context.get("workbench") if isinstance(context, dict) else None
     scope = context.get("provider_tool_scope", {}) if isinstance(context, dict) else {}
+    project = context.get("vibecad_project") if isinstance(context, dict) else None
+    has_project = isinstance(project, dict)
+    phase = _phase_name(project) if has_project else "unknown"
+    phase_spec = _phase_spec(project) if has_project else {}
+    phase_validation = _phase_validation_from_context(context)
     contract = WORKBENCH_EXECUTION_CONTRACTS.get(str(workbench or ""))
     if contract is None:
         return {
             "mode": "generic_native_freecad",
+            "active_phase": phase,
+            "phase_goal": phase_spec.get("goal"),
+            "phase_success_gates": list(phase_spec.get("success_gates", [])),
+            "phase_validation_ok": phase_validation.get("ok"),
             "active_tool_phase": scope.get("phase") if isinstance(scope, dict) else None,
             "active_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
             "required_order": [
@@ -1571,25 +2192,37 @@ def _execution_contract_for_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "workbench": workbench,
         "mode": contract["mode"],
+        "active_phase": phase,
+        "phase_goal": phase_spec.get("goal"),
+        "phase_success_gates": list(phase_spec.get("success_gates", [])),
+        "phase_validation_ok": phase_validation.get("ok"),
         "active_tool_phase": scope.get("phase") if isinstance(scope, dict) else None,
         "active_tool_scope_reason": scope.get("reason") if isinstance(scope, dict) else None,
         "active_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
         "full_workbench_tool_count": scope.get("full_workbench_tool_count") if isinstance(scope, dict) else None,
         "required_order": list(contract["required_order"]),
         "completion_gates": list(contract["completion_gates"]),
-        "available_tools_this_turn": (
-            list(scope.get("active_tool_names") or [])
-            if isinstance(scope, dict)
-            else []
-        ),
+        "available_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
     }
+
+
+def _phase_validation_from_context(context: dict[str, Any]) -> dict[str, Any]:
+    validation = context.get("phase_validation") if isinstance(context, dict) else None
+    return validation if isinstance(validation, dict) else {}
 
 
 def _next_loop_step(
     remaining: list[str],
     object_count: int,
     has_recent_trace: bool,
+    workspace_mode: str = "",
 ) -> str:
+    if workspace_mode == "intent":
+        return "Update the intent brief or ask targeted questions; do not create geometry."
+    if workspace_mode == "planner":
+        return "Inspect if useful, then explicitly enter the best workspace for the next CAD operation."
+    if workspace_mode == "workspace":
+        return "Use this workspace's native tools for the next CAD increment, or enter another workspace if needed."
     if remaining:
         first = remaining[0].lstrip("- ").strip()
         return f"Resolve next verified gap: {first}"
@@ -1712,6 +2345,7 @@ def _format_document_delta(delta: Any) -> str:
 
 
 def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
+    phase_preamble = _phase_prompt_preamble(context)
     conversation_context = context.get("conversation", {})
     conversation = (
         conversation_context.get("conversation", [])
@@ -1719,7 +2353,7 @@ def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
         else []
     )
     if not conversation:
-        return prompt
+        return f"{phase_preamble}\n\nCurrent user request: {prompt}".strip()
     scope = (
         conversation_context.get("scope", {})
         if isinstance(conversation_context, dict)
@@ -1746,7 +2380,41 @@ def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
         content = str(item.get("content", "")).strip()
         if content:
             lines.append(f"{role}: {content}")
+    lines = [phase_preamble, "", *lines]
     lines.extend(["", f"Current user request: {prompt}"])
+    return "\n".join(lines)
+
+
+def _phase_prompt_preamble(context: dict[str, Any]) -> str:
+    project = context.get("vibecad_project", {})
+    workspace = context.get("vibecad_workspace", {})
+    request = context.get("vibecad_request", {})
+    phase = str(project.get("active_phase") or "intent") if isinstance(project, dict) else "intent"
+    phase_info = project.get("phase", {}) if isinstance(project, dict) else {}
+    intent = project.get("intent", {}) if isinstance(project, dict) else {}
+    readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
+    allowed = phase_info.get("allowed_workbenches", []) if isinstance(phase_info, dict) else []
+    lines = [
+        "VibeCAD project phase contract:",
+        f"- active phase: {phase}",
+        f"- phase goal: {phase_info.get('goal') if isinstance(phase_info, dict) else ''}",
+        f"- working intent ready: {_phase_intent_is_approved(context.get('vibecad_project'))}",
+        f"- intent readiness: {readiness.get('score', 0) if isinstance(readiness, dict) else 0}/100",
+        f"- allowed workspaces: {', '.join(str(item) for item in allowed) if allowed else 'none in this phase'}",
+        f"- workspace mode: {workspace.get('mode') if isinstance(workspace, dict) else 'unknown'}",
+        f"- request mode: {request.get('mode') if isinstance(request, dict) else 'unknown'}",
+    ]
+    if isinstance(request, dict) and request.get("preserve_existing_model"):
+        lines.append(
+            "- hard rule: preserve the existing model; inspect/modify the current target in place and do not create a replacement body/document."
+        )
+    if phase == "intent":
+        lines.append("- hard rule: do not create CAD geometry in Intent; create/update the intent brief instead.")
+    elif isinstance(intent, dict) and not _phase_intent_is_approved(context.get("vibecad_project")):
+        lines.append("- hard rule: capture a usable working intent brief before downstream CAD authoring.")
+    steering = context.get("human_steering", {})
+    if isinstance(steering, dict) and steering.get("active_messages"):
+        lines.append("- live steering: " + " | ".join(str(item) for item in steering["active_messages"][-4:]))
     return "\n".join(lines)
 
 
@@ -1784,9 +2452,27 @@ def _continuation_prompt(
         trace_lines.append(
             f"- {item.get('tool_name')}: {'ok' if item.get('ok') else 'failed'}{suffix}"
         )
-    missing_lines = _missing_requirement_lines(prompt, context, tool_trace)
     loop_state = context.get("vibecad_loop", {})
+    missing_lines = (
+        list(loop_state.get("remaining_outcomes", []))
+        if isinstance(loop_state, dict)
+        else []
+    )
+    validation_lines = (
+        list(loop_state.get("state_validation_notes", []))
+        if isinstance(loop_state, dict)
+        else []
+    )
+    steering = context.get("human_steering", {})
+    steering_lines = []
+    if isinstance(steering, dict):
+        steering_lines = [
+            f"- {item}"
+            for item in steering.get("active_messages", [])[-8:]
+            if str(item).strip()
+        ]
     loop_lines = []
+    request = context.get("vibecad_request", {})
     if isinstance(loop_state, dict):
         delta = loop_state.get("document_delta")
         contract = loop_state.get("execution_contract")
@@ -1815,6 +2501,12 @@ def _continuation_prompt(
                     "- completion gates: "
                     + "; ".join(str(item) for item in completion_gates)
                 )
+    if isinstance(request, dict):
+        loop_lines.append(f"- request mode: {request.get('mode')}")
+        if request.get("preserve_existing_model"):
+            loop_lines.append(
+                "- preserve existing model: modify active/selected geometry in place; do not create replacement body/document"
+            )
     screenshot = context.get("view_screenshot", {})
     visual = screenshot.get("visual_observation", {}) if isinstance(screenshot, dict) else {}
     visual_lines = []
@@ -1863,6 +2555,12 @@ def _continuation_prompt(
             "Remaining state-based outcomes:",
             "\n".join(missing_lines) or "- none detected from current FreeCAD state",
             "",
+            "State validation observations:",
+            "\n".join(validation_lines) or "- none",
+            "",
+            "Live user steering messages:",
+            "\n".join(steering_lines) or "- none",
+            "",
             "Continue now. If a tool failed, choose a different function tool or "
             "recover using the current document state.",
         ]
@@ -1883,23 +2581,32 @@ def _should_continue_autonomously(
     ):
         return False
     output_text = output.lower()
-    doc_count = int(service.document_summary().get("object_count", 0) or 0)
-    verified_state_satisfied = False
-    try:
-        if _missing_requirement_lines(prompt, service.provider_context_summary(), tool_trace):
-            return True
-        verified_state_satisfied = True
-    except Exception:
-        pass
-    if verified_state_satisfied and doc_count > 0 and _provider_attempted_write(tool_trace):
-        return False
     if _assistant_reported_checkpoint(output_text):
         return True
-    if _assistant_stopped_without_finishing(output_text):
-        return True
-    if _active_sketch_or_task_requires_more_work(service):
-        return True
     if _tool_batch_checkpoint_reached(tool_trace):
+        return True
+    try:
+        if normalize_phase(service.phase_context().get("active_phase")) == "intent":
+            return False
+    except Exception:
+        pass
+    try:
+        current_context = service.provider_context_summary()
+        missing = _missing_requirement_lines(prompt, current_context, tool_trace)
+        if missing:
+            human_gate = any(
+                "materially ambiguous" in line
+                or "impossible" in line
+                or "destructive" in line
+                for line in missing
+            )
+            return not human_gate
+    except Exception:
+        pass
+    doc_count = int(service.document_summary().get("object_count", 0) or 0)
+    if doc_count > 0 and _provider_attempted_write(tool_trace):
+        return False
+    if _assistant_stopped_without_finishing(output_text):
         return True
     if _assistant_asked_questions(output_text) and _provider_attempted_write(tool_trace):
         return True
@@ -2080,6 +2787,33 @@ def _missing_requirement_lines(
     tool_trace: list[dict[str, Any]],
 ) -> list[str]:
     lines = []
+    project = context.get("vibecad_project") if isinstance(context, dict) else None
+    has_project = isinstance(project, dict)
+    phase = _phase_name(project) if has_project else "unknown"
+    validation = _phase_validation_from_context(context)
+    if has_project and phase == "intent":
+        intent = project.get("intent", {}) if isinstance(project, dict) else {}
+        readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
+        missing_fields = readiness.get("missing_fields", []) if isinstance(readiness, dict) else []
+        if missing_fields:
+            return [
+                "- complete the intent brief before creating geometry; missing fields: "
+                + ", ".join(str(item) for item in missing_fields[:8])
+            ]
+        if not _phase_intent_is_approved(project):
+            return ["- create/update the working intent brief, state assumptions, then continue to the CAD phase if the request is clear enough"]
+    elif (
+        has_project
+        and not _phase_intent_is_approved(project)
+    ):
+        return [
+            "- create/update a usable working intent brief before CAD authoring in "
+            f"the {phase} phase"
+        ]
+    if isinstance(validation, dict) and validation.get("failures"):
+        for failure in validation.get("failures", [])[:4]:
+            if isinstance(failure, dict):
+                lines.append(f"- phase gate not satisfied: {failure.get('name')}")
     objects = context.get("document", {}).get("objects", [])
     document = context.get("document", {})
     object_count = int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
@@ -2260,17 +2994,36 @@ def _needs_screenshot_after_latest_successful_write(
     tool_trace: list[dict[str, Any]],
 ) -> bool:
     latest_write_index = -1
-    latest_screenshot_index = -1
+    latest_screenshot_terminal_index = -1
     for index, item in enumerate(tool_trace):
-        if not isinstance(item, dict) or not item.get("ok"):
+        if not isinstance(item, dict):
             continue
         tool_name = str(item.get("tool_name") or "")
         if tool_name == "core.capture_view_screenshot":
-            latest_screenshot_index = index
+            if item.get("ok") or _screenshot_failure_is_terminal_for_process(item):
+                latest_screenshot_terminal_index = index
+            continue
+        if not item.get("ok"):
             continue
         if item.get("safety") == SafetyLevel.SAFE_WRITE.value:
             latest_write_index = index
-    return latest_write_index >= 0 and latest_screenshot_index < latest_write_index
+    return latest_write_index >= 0 and latest_screenshot_terminal_index < latest_write_index
+
+
+def _screenshot_failure_is_terminal_for_process(item: dict[str, Any]) -> bool:
+    result = item.get("result")
+    error = ""
+    if isinstance(result, dict):
+        error = str(result.get("error") or "")
+    if not error:
+        error = str(item.get("error") or "")
+    lowered = error.lower()
+    return (
+        "freecadgui" in lowered
+        or "qapplication unavailable" in lowered
+        or "gui unavailable" in lowered
+        or "no active gui document" in lowered
+    )
 
 
 def _tool_batch_checkpoint_reached(tool_trace: list[dict[str, Any]]) -> bool:
@@ -2281,7 +3034,7 @@ def _tool_batch_checkpoint_reached(tool_trace: list[dict[str, Any]]) -> bool:
         if result.get("checkpoint") in {
             "small_step",
             "workbench_switch",
-            "tool_surface_refresh",
+            "workspace_entry",
         }:
             return True
         if result.get("status") == "deferred_checkpoint":
@@ -2298,16 +3051,210 @@ def provider_safe_tool_schemas(
     service: VibeCADService,
     workbench: str | None = None,
     tool_names: set[str] | None = None,
+    *,
+    apply_workbench_allowlist: bool = True,
 ) -> list[dict[str, Any]]:
     schemas = []
     for tool_name in service.registry.names():
         if tool_names is not None and tool_name not in tool_names:
             continue
-        if is_provider_safe_tool(service, tool_name, workbench):
+        if is_provider_safe_tool(
+            service,
+            tool_name,
+            workbench,
+            apply_workbench_allowlist=apply_workbench_allowlist,
+        ):
             schemas.append(
                 service.registry.get(tool_name).to_schema(active_workbench=workbench)
             )
     return schemas
+
+
+def _is_geometry_write_tool(tool: Any) -> bool:
+    return (
+        getattr(tool, "safety", None) is SafetyLevel.SAFE_WRITE
+        and getattr(tool, "name", "") not in NON_GEOMETRY_PROVIDER_WRITE_TOOLS
+    )
+
+
+def _phase_tool_block(
+    service: VibeCADService,
+    tool: Any,
+    live_workbench: str | None,
+    request_policy: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    request_policy = request_policy if isinstance(request_policy, dict) else {}
+    if tool.name in DOCUMENT_MANAGEMENT_TOOLS:
+        return {
+            "ok": False,
+            "error": (
+                f"{tool.name} is not available to the autonomous CAD loop. "
+                "Document creation/opening must be an explicit user/UI action or "
+                "a future dedicated document-management phase."
+            ),
+            "recoverable": True,
+            "required_next_action": {
+                "why": "Keep the model in the current document unless the user explicitly starts document management.",
+            },
+        }
+    if request_policy.get("preserve_existing_model"):
+        try:
+            existing_objects = int(service.document_summary().get("object_count", 0) or 0)
+        except Exception:
+            existing_objects = int(request_policy.get("document_object_count_at_start", 0) or 0)
+        if existing_objects > 0:
+            if tool.name == "partdesign.create_body":
+                return {
+                    "ok": False,
+                    "error": (
+                        "partdesign.create_body is blocked because the user request "
+                        "refers to improving/fixing the existing model. Inspect and "
+                        "modify the current active/selected Body instead of creating "
+                        "a replacement Body."
+                    ),
+                    "request_mode": request_policy.get("mode"),
+                    "recoverable": True,
+                    "required_next_action": {
+                        "inspect_first": [
+                            "core.get_active_document",
+                            "core.get_selection",
+                            "partdesign.get_bodies",
+                            "core.get_object_properties",
+                        ],
+                        "why": "Preserve existing model identity unless the user explicitly asks for replacement.",
+                    },
+                }
+            if tool.name in {"core.delete_object", "part.create_primitive"}:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"{tool.name} is blocked because the request refers to "
+                        "the existing model. Modify current geometry/features in "
+                        "place instead of deleting or replacing the model."
+                    ),
+                    "request_mode": request_policy.get("mode"),
+                    "recoverable": True,
+                    "required_next_action": {
+                        "inspect_first": [
+                            "core.get_active_document",
+                            "core.get_selection",
+                            "core.get_object_properties",
+                        ],
+                        "why": "Preserve existing model identity unless the user explicitly asks for replacement or deletion.",
+                    },
+                }
+    phase_context = service.phase_context()
+    phase = _phase_name(phase_context)
+    if tool.name == "intent.update_brief" and phase != "intent":
+        return {
+            "ok": False,
+            "error": "intent.update_brief is only available in the Intent phase.",
+            "active_phase": phase,
+            "recoverable": True,
+            "required_next_action": {
+                "tool": "phase.set_current",
+                "arguments": {"phase": "intent", "reason": "Update the project brief."},
+            },
+        }
+    if _is_geometry_write_tool(tool):
+        if phase == "intent":
+            return {
+                "ok": False,
+                "error": (
+                    "CAD geometry tools are blocked in the Intent phase. "
+                    "Capture/update the working intent brief first."
+                ),
+                "active_phase": phase,
+                "recoverable": True,
+                "required_next_action": {
+                    "tool": "intent.update_brief",
+                    "why": "Intent must be captured before geometry authoring.",
+                },
+            }
+        if _phase_requires_approved_intent(phase_context) and not _phase_intent_is_approved(phase_context):
+            return {
+                "ok": False,
+                "error": (
+                    f"CAD geometry tools are blocked in phase '{phase}' until "
+                    "a usable working intent brief exists."
+                ),
+                "active_phase": phase,
+                "recoverable": True,
+                "required_next_action": {
+                    "tool": "phase.set_current",
+                    "arguments": {"phase": "intent", "reason": "Capture working design intent first."},
+                },
+            }
+        tool_workbench = getattr(tool, "workbench", None) or live_workbench
+        if tool_workbench and not _phase_allows_workbench(phase_context, str(tool_workbench)):
+            return {
+                "ok": False,
+                "error": (
+                    f"{tool.name} belongs to {tool_workbench}, which is outside "
+                    f"the active VibeCAD phase '{phase}'."
+                ),
+                "active_phase": phase,
+                "tool_workbench": tool_workbench,
+                "allowed_workbenches": sorted(_phase_allowed_workbenches(phase_context)),
+                "recoverable": True,
+                "required_next_action": {
+                    "tool": "phase.set_current",
+                    "why": "Change to the workflow phase that owns this operation.",
+                },
+            }
+    return None
+
+
+def _consume_steering(steering_check: SteeringCheck | None) -> list[str]:
+    if steering_check is None:
+        return []
+    try:
+        messages = steering_check()
+    except Exception:
+        return []
+    if not isinstance(messages, list):
+        return []
+    return [str(item).strip() for item in messages if str(item).strip()]
+
+
+def _inject_human_steering(context: dict[str, Any], messages: list[str]) -> None:
+    if not messages:
+        return
+    existing = context.get("human_steering")
+    if not isinstance(existing, dict):
+        existing = {}
+    applied = list(existing.get("active_messages") or [])
+    applied.extend(messages)
+    existing["active_messages"] = applied[-12:]
+    existing["instruction"] = (
+        "These are live user steering messages. Treat them as newer than the "
+        "original prompt and adjust the next CAD action accordingly."
+    )
+    context["human_steering"] = existing
+
+
+def _attach_steering_to_tool_result(
+    result: dict[str, Any],
+    steering_check: SteeringCheck | None,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    messages = _consume_steering(steering_check)
+    if not messages:
+        return
+    result["human_steering"] = {
+        "messages": messages,
+        "instruction": (
+            "The user added this guidance while the tool loop was running. "
+            "Apply it before choosing the next tool or claiming completion."
+        ),
+    }
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "human_steering_consumed",
+            "message_count": len(messages),
+        },
+    )
 
 
 def make_provider_tool_runner(
@@ -2317,6 +3264,8 @@ def make_provider_tool_runner(
     progress_callback: ProgressCallback | None = None,
     turn_state: dict[str, Any] | None = None,
     cancellation_check: CancellationCheck | None = None,
+    steering_check: SteeringCheck | None = None,
+    request_policy: dict[str, Any] | None = None,
 ):
     enforce_small_step_checkpoint = turn_state is not None
     active_turn_state = turn_state if turn_state is not None else {}
@@ -2334,6 +3283,17 @@ def make_provider_tool_runner(
             "arguments_json": _trace_text(arguments_json or "{}"),
             "ok": False,
         }
+
+        def _finalize_result(
+            result: dict[str, Any],
+            *,
+            attach_steering: bool = True,
+        ) -> dict[str, Any]:
+            if attach_steering:
+                _attach_steering_to_tool_result(result, steering_check, progress_callback)
+            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
+            return result
+
         if cancellation_check is not None and cancellation_check():
             result = {
                 "ok": False,
@@ -2341,14 +3301,12 @@ def make_provider_tool_runner(
                 "cancelled": True,
                 "active_workbench": live_workbench,
             }
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result, attach_steering=False)
         try:
             tool = service.registry.get(tool_name)
         except KeyError:
             result = {"ok": False, "error": f"Unknown VibeCAD tool: {tool_name}"}
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
 
         trace_entry["safety"] = tool.safety.value
         trace_entry["tool_workbench"] = tool.workbench
@@ -2364,34 +3322,34 @@ def make_provider_tool_runner(
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
             }
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
 
-        if _is_primitive_tool_blocked(service, tool.name):
+        phase_block = _phase_tool_block(service, tool, live_workbench, request_policy)
+        if phase_block is not None:
+            return _finalize_result(phase_block)
+
+        if _is_primitive_tool_blocked(service, tool.name, live_workbench):
             result = {
                 "ok": False,
                 "error": (
-                    "Part primitive write tools are disabled for the AI loop. "
-                    "Use native PartDesign sketch/feature tools, or explicitly "
-                    f"enable primitive provider tools before calling: {tool_name}"
+                    "Part primitive write tools are only exposed to the AI loop "
+                    "inside PartWorkbench unless primitive shortcuts are explicitly "
+                    f"enabled before calling: {tool_name}"
                 ),
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
                 "opt_in_required": "AllowPrimitiveProviderTools",
             }
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
 
         try:
             args = json.loads(arguments_json or "{}")
         except json.JSONDecodeError as exc:
             result = {"ok": False, "error": f"Invalid JSON arguments: {exc}"}
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
         if not isinstance(args, dict):
             result = {"ok": False, "error": "Tool arguments must be a JSON object."}
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
 
         if enforce_small_step_checkpoint and active_turn_state.get("workbench_switch_reached"):
             checkpoint_name = str(active_turn_state.get("deferred_checkpoint") or "workbench_switch")
@@ -2417,7 +3375,6 @@ def make_provider_tool_runner(
                 },
                 "turn": active_turn_state.get("turn"),
             }
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
             _emit_progress(
                 progress_callback,
                 {
@@ -2427,7 +3384,7 @@ def make_provider_tool_runner(
                     "turn": active_turn_state.get("turn"),
                 },
             )
-            return result
+            return _finalize_result(result)
 
         if not _is_tool_available_in_live_context(service, tool, live_workbench):
             auto_switched = _try_auto_activate_tool_workbench(service, tool, live_workbench)
@@ -2464,8 +3421,7 @@ def make_provider_tool_runner(
                         else None
                     ),
                 }
-                _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-                return result
+                return _finalize_result(result)
 
         if not service.is_tool_enabled_for_provider(tool, live_workbench):
             result = {
@@ -2474,8 +3430,7 @@ def make_provider_tool_runner(
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
             }
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-            return result
+            return _finalize_result(result)
 
         if (
             enforce_small_step_checkpoint
@@ -2504,7 +3459,6 @@ def make_provider_tool_runner(
                 "limit": _max_mutating_tool_calls_per_provider_turn(),
             }
             active_turn_state["checkpoint_reached"] = True
-            _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
             _emit_progress(
                 progress_callback,
                 {
@@ -2516,7 +3470,7 @@ def make_provider_tool_runner(
                     "limit": _max_mutating_tool_calls_per_provider_turn(),
                 },
             )
-            return result
+            return _finalize_result(result)
 
         if enforce_small_step_checkpoint and _counts_toward_small_step_checkpoint(tool.name, tool.safety):
             active_turn_state["mutating_tool_calls"] = (
@@ -2532,19 +3486,30 @@ def make_provider_tool_runner(
                     "active_workbench": live_workbench,
                     "tool_workbench": tool.workbench,
                 }
-                _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-                return result
+                return _finalize_result(result, attach_steering=False)
             payload = service.registry.call(tool_name, **args)
             result = {
                 "ok": not (isinstance(payload, dict) and payload.get("ok") is False),
                 "result": payload,
             }
-            if result["ok"] and tool_name == "core.activate_workbench":
+            if result["ok"] and tool_name in {"core.activate_workbench", "core.enter_workspace"}:
                 requested_workbench = str(args.get("name", "") or "").strip()
-                if requested_workbench and requested_workbench != live_workbench:
+                should_checkpoint = (
+                    bool(requested_workbench)
+                    and (
+                        tool_name == "core.enter_workspace"
+                        or requested_workbench != live_workbench
+                    )
+                )
+                if should_checkpoint:
+                    checkpoint_name = (
+                        "workspace_entry"
+                        if tool_name == "core.enter_workspace"
+                        else "workbench_switch"
+                    )
                     current_workbench = requested_workbench
                     trace_entry["active_workbench"] = requested_workbench
-                    result["checkpoint"] = "workbench_switch"
+                    result["checkpoint"] = checkpoint_name
                     result["next_step"] = (
                         "Return progress now so VibeCAD can refresh provider "
                         f"function tools for {requested_workbench}."
@@ -2552,50 +3517,20 @@ def make_provider_tool_runner(
                     result["required_next_action"] = {
                         "finish_current_turn": True,
                         "next_turn_workbench": requested_workbench,
-                        "why": "Workbench-scoped tool lists are refreshed between provider turns.",
+                        "why": (
+                            "The model explicitly entered a workspace; concrete "
+                            "workspace tools are exposed on the next provider turn."
+                        ),
                     }
                     if enforce_small_step_checkpoint:
                         active_turn_state["workbench_switch_reached"] = True
-                        active_turn_state["deferred_checkpoint"] = "workbench_switch"
+                        active_turn_state["deferred_checkpoint"] = checkpoint_name
                     _emit_progress(
                         progress_callback,
                         {
                             "event": "tool_workbench_switch_checkpoint_reached",
                             "tool_name": tool_name,
                             "active_workbench": requested_workbench,
-                            "turn": active_turn_state.get("turn"),
-                        },
-                    )
-            if result["ok"] and _tool_surface_refresh_checkpoint(tool_name):
-                result_payload = result.get("result") if isinstance(result.get("result"), dict) else {}
-                next_workbench, next_tools = _tool_surface_refresh_target(tool_name, result_payload)
-                if next_workbench:
-                    current_workbench = next_workbench
-                    trace_entry["active_workbench"] = next_workbench
-                    result["checkpoint"] = "tool_surface_refresh"
-                    result["next_step"] = (
-                        "Return progress now so VibeCAD can refresh provider "
-                        f"function tools for {next_workbench}."
-                    )
-                    result["required_next_action"] = {
-                        "finish_current_turn": True,
-                        "next_turn_workbench": next_workbench,
-                        "expected_tools": next_tools,
-                        "why": (
-                            "The active Sketcher edit/task state changed, so "
-                            "the direct callable tool surface must refresh before "
-                            "continuing native CAD operations."
-                        ),
-                    }
-                    if enforce_small_step_checkpoint:
-                        active_turn_state["workbench_switch_reached"] = True
-                        active_turn_state["deferred_checkpoint"] = "tool_surface_refresh"
-                    _emit_progress(
-                        progress_callback,
-                        {
-                            "event": "tool_surface_refresh_checkpoint_reached",
-                            "tool_name": tool_name,
-                            "active_workbench": next_workbench,
                             "turn": active_turn_state.get("turn"),
                         },
                     )
@@ -2634,48 +3569,10 @@ def make_provider_tool_runner(
                 )
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
-        _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
-        return result
+        return _finalize_result(result)
 
     setattr(_run, "_vibecad_turn_state", active_turn_state)
     return _run
-
-
-def _tool_surface_refresh_checkpoint(tool_name: str) -> bool:
-    return tool_name in {
-        "partdesign.create_sketch",
-        "sketcher.create_sketch",
-        "sketcher.open_sketch",
-        "sketcher.close_sketch",
-    }
-
-
-def _tool_surface_refresh_target(tool_name: str, result: dict[str, Any]) -> tuple[str | None, list[str]]:
-    if tool_name in {"partdesign.create_sketch", "sketcher.create_sketch", "sketcher.open_sketch"}:
-        return (
-            "SketcherWorkbench",
-            [
-                "sketcher.draw_rectangle",
-                "sketcher.add_circle",
-                "sketcher.add_line",
-                "sketcher.add_polyline",
-                "sketcher.close_sketch",
-            ],
-        )
-    if tool_name == "sketcher.close_sketch":
-        profile = result.get("profile_status") if isinstance(result, dict) else None
-        if isinstance(profile, dict) and (
-            profile.get("ready_for_pad") or profile.get("ready_for_pocket")
-        ):
-            return (
-                "PartDesignWorkbench",
-                [
-                    "partdesign.pad_sketch",
-                    "partdesign.pocket_sketch",
-                    "partdesign.revolve_sketch",
-                ],
-            )
-    return (None, [])
 
 
 def _mutating_tool_checkpoint_reached(turn_state: dict[str, Any]) -> bool:
@@ -2722,11 +3619,6 @@ def _is_tool_available_in_live_context(
     if workbench == "PartDesignWorkbench" and _is_partdesign_sketcher_tool(tool.name):
         try:
             return tool.name == "sketcher.get_sketch" or bool(service.sketcher_summary().get("found"))
-        except Exception:
-            return False
-    if tool.name in {"partdesign.pad_sketch", "partdesign.pocket_sketch", "partdesign.revolve_sketch"}:
-        try:
-            return bool(service.sketcher_summary().get("found"))
         except Exception:
             return False
     return False

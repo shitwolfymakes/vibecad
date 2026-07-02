@@ -30,6 +30,7 @@ TOOL_MODULE_NAMES = (
     "add_point",
     "add_polyline",
     "add_circle",
+    "add_hole_pattern",
     "add_arc",
     "add_ellipse",
     "add_bspline",

@@ -22,6 +22,24 @@ def _model_visible_context(context: dict[str, Any]) -> dict[str, Any]:
     visible.pop("provider_function_tools", None)
     visible.pop("provider_tool_surface", None)
     visible.pop("tool_shape_report", None)
+    scope = visible.get("provider_tool_scope")
+    if isinstance(scope, dict):
+        visible_scope = dict(scope)
+        active_names = visible_scope.pop("active_tool_names", None)
+        if isinstance(active_names, list):
+            visible_scope["active_tool_name_count"] = len(active_names)
+        visible["provider_tool_scope"] = visible_scope
+    loop = visible.get("vibecad_loop")
+    if isinstance(loop, dict):
+        visible_loop = dict(loop)
+        contract = visible_loop.get("execution_contract")
+        if isinstance(contract, dict):
+            visible_contract = dict(contract)
+            tool_names = visible_contract.pop("available_tools_this_turn", None)
+            if isinstance(tool_names, list):
+                visible_contract["available_tool_count"] = len(tool_names)
+            visible_loop["execution_contract"] = visible_contract
+        visible["vibecad_loop"] = visible_loop
     return visible
 
 
