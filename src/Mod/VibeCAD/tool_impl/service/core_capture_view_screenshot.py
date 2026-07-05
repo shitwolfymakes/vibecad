@@ -4,14 +4,15 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import re
 import time
 
+from VibeCADProject import vibecad_data_dir
 
-TOOL_SPEC = {'description': 'Capture the active FreeCAD viewport to a durable project PNG and return '
-                'redacted metadata.',
+
+TOOL_SPEC = {'description': 'Capture the active viewport to a project PNG for visual '
+                'verification of geometry; returns redacted file metadata.',
  'name': 'core.capture_view_screenshot',
  'safety': 'VIEW'}
 
@@ -83,20 +84,20 @@ def _active_workbench_name(gui):
 
 
 def _screenshot_artifact_dir(service) -> Path:
+    """Screenshot folder inside the per-document project directory.
+
+    Project roots always live under the central VibeCAD data dir, so
+    screenshots are never written next to the CAD file. Without a project
+    context the fallback still lands inside ``vibecad_data_dir()``.
+    """
     try:
-        phase_context = service.phase_context()
+        project_context = service.project_context()
     except Exception:
-        phase_context = {}
-    root = phase_context.get("root") if isinstance(phase_context, dict) else None
+        project_context = {}
+    root = project_context.get("root") if isinstance(project_context, dict) else None
     if root:
-        return Path(str(root)).expanduser() / "artifacts" / "screenshots"
-    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
-    if configured:
-        return Path(configured).expanduser() / "artifacts" / "screenshots"
-    try:
-        return Path.home() / ".vibecad" / "artifacts" / "screenshots"
-    except Exception:
-        return Path.cwd() / ".vibecad" / "artifacts" / "screenshots"
+        return Path(str(root)).expanduser() / "screenshots"
+    return vibecad_data_dir() / "screenshots"
 
 
 def _slug(value: str) -> str:

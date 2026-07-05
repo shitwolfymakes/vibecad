@@ -5,17 +5,25 @@
 from __future__ import annotations
 
 import json
-import math
-import os
 from pathlib import Path
 import re
+import shutil
 import time
 from typing import Any
 import uuid
 
-from VibeCADAuth import AuthState, read_dotenv_key, read_keyring_key, resolve_auth_state
+from VibeCADAuth import (
+    AuthState,
+    provider_spec,
+    resolve_auth_credential,
+    resolve_auth_state,
+)
 from VibeCADPreferences import configured_dotenv_path, load_settings
-from VibeCADProject import PHASE_SPECS, VibeCADProjectStore, normalize_phase
+from VibeCADProject import (
+    VibeCADProjectStore,
+    project_root_for_document_file,
+    vibecad_data_dir,
+)
 from VibeCADTools import SafetyLevel, ToolRegistry
 from VibeCADTransactions import ApprovalQueue
 from VibeCADWorkbenchTools import get_tool_pack, list_tool_packs
@@ -27,16 +35,149 @@ MAX_CONTEXT_OBJECTS = 25
 MAX_CONTEXT_COMMANDS = 120
 MAX_CONTEXT_WORKBENCH_OBJECTS = 40
 MAX_CONVERSATION_TURNS = 40
+REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+MAX_REFERENCE_IMAGES = 6
+REFERENCE_IMAGE_MAX_EDGE = 1568
+REFERENCE_IMAGE_MAX_BYTES = 2_000_000
+_REFERENCE_IMAGE_MIN_EDGE = 512
+_REFERENCE_ENCODE_FORMATS = {
+    "jpg": "JPG",
+    "jpeg": "JPG",
+    "png": "PNG",
+    "webp": "WEBP",
+}
+
+# Script mode (opt-in preference) swaps the write surface: the script tool
+# becomes the only geometry write path and the structured write tools are
+# hidden, so the model faces one coherent authoring paradigm at a time.
+BUILD_SCRIPT_TOOL_NAME = "model.build_from_script"
+# Non-geometry write tools that stay available in script mode because they
+# are part of the feedback/reporting loop, not competing authoring paths.
+SCRIPT_MODE_ALLOWED_WRITE_TOOLS = {
+    BUILD_SCRIPT_TOOL_NAME,
+    "core.report_tool_shape_gap",
+    "core.undo_last_vibecad_action",
+}
+
+
+def _slug_filename(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
+    return slug[:64] or "reference"
+
+
+def _load_qt_modules() -> tuple[Any, Any] | None:
+    """Return (QtCore, QtGui) via the FreeCAD PySide shim or PySide6, else None."""
+    try:
+        from PySide import QtCore, QtGui
+
+        return QtCore, QtGui
+    except Exception:
+        try:
+            from PySide6 import QtCore, QtGui
+
+            return QtCore, QtGui
+        except Exception:
+            return None
+
+
+def downscale_reference_image(
+    path: str | Path,
+    max_edge: int = REFERENCE_IMAGE_MAX_EDGE,
+    max_bytes: int = REFERENCE_IMAGE_MAX_BYTES,
+) -> dict[str, Any]:
+    """Downscale/re-encode an image file in place when it exceeds limits.
+
+    Pure function of the file at ``path``: reads it, optionally rewrites it,
+    and returns metadata (``size_bytes``, ``image_size``, ``downscaled``,
+    ``qt_available``). Gracefully no-ops when Qt bindings are unavailable
+    and never raises for bad input.
+    """
+    target = Path(str(path or "")).expanduser()
+    result: dict[str, Any] = {
+        "path": str(target),
+        "downscaled": False,
+        "qt_available": False,
+        "size_bytes": None,
+        "image_size": None,
+    }
+    try:
+        original_bytes = int(target.stat().st_size)
+    except OSError as exc:
+        result["error"] = f"Reference image not readable: {exc}"
+        return result
+    result["size_bytes"] = original_bytes
+
+    qt_modules = _load_qt_modules()
+    if qt_modules is None:
+        return result
+    qt_core, qt_gui = qt_modules
+    result["qt_available"] = True
+
+    try:
+        image = qt_gui.QImage(str(target))
+        if image.isNull():
+            result["error"] = "Image could not be decoded for downscaling."
+            return result
+        width = int(image.width())
+        height = int(image.height())
+        result["image_size"] = [width, height]
+        long_edge = max(width, height)
+        if long_edge <= max_edge and original_bytes <= max_bytes:
+            return result
+
+        encode_format = _REFERENCE_ENCODE_FORMATS.get(
+            target.suffix.lower().lstrip("."), "PNG"
+        )
+        edge = min(long_edge, max_edge)
+        quality = 90
+        best_payload: bytes | None = None
+        for _attempt in range(8):
+            scaled = image
+            if max(width, height) > edge:
+                scaled = image.scaled(
+                    edge,
+                    edge,
+                    qt_core.Qt.KeepAspectRatio,
+                    qt_core.Qt.SmoothTransformation,
+                )
+            buffer = qt_core.QBuffer()
+            buffer.open(qt_core.QIODevice.WriteOnly)
+            saved = scaled.save(buffer, encode_format, quality)
+            payload = bytes(buffer.data())
+            buffer.close()
+            if saved and payload:
+                if best_payload is None or len(payload) < len(best_payload):
+                    best_payload = payload
+                if len(payload) <= max_bytes:
+                    break
+            if encode_format in ("JPG", "WEBP") and quality > 40:
+                quality -= 15
+            elif edge > _REFERENCE_IMAGE_MIN_EDGE:
+                edge = max(_REFERENCE_IMAGE_MIN_EDGE, int(edge * 0.75))
+            else:
+                break
+
+        if best_payload is None:
+            result["error"] = "Image could not be re-encoded for downscaling."
+            return result
+        if len(best_payload) >= original_bytes and long_edge <= max_edge:
+            # Re-encoding gained nothing and dimensions were already fine.
+            return result
+        target.write_bytes(best_payload)
+        final = qt_gui.QImage(str(target))
+        result["downscaled"] = True
+        result["size_bytes"] = len(best_payload)
+        if not final.isNull():
+            result["image_size"] = [int(final.width()), int(final.height())]
+        return result
+    except Exception as exc:
+        result["error"] = f"Downscale failed: {exc}"
+        return result
 
 
 def _vibecad_user_data_dir() -> Path:
-    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    try:
-        return Path.home() / ".vibecad"
-    except Exception:
-        return Path.cwd() / ".vibecad"
+    """Backward-compatible alias for the central VibeCAD data dir."""
+    return vibecad_data_dir()
 
 
 class VibeCADService:
@@ -47,6 +188,7 @@ class VibeCADService:
         self._registry = ToolRegistry()
         self._approvals = ApprovalQueue()
         self._last_view_screenshot: dict[str, Any] | None = None
+        self._reference_images: list[dict[str, Any]] = []
         self._conversation_cache: list[dict[str, Any]] = []
         self._conversation_cache_key: str | None = None
         self._local_session_id = uuid.uuid4().hex
@@ -65,33 +207,35 @@ class VibeCADService:
         return self._approvals
 
     def auth_state(self) -> AuthState:
-        return resolve_auth_state(dotenv_path=self._dotenv_path())
+        return resolve_auth_state(
+            dotenv_path=self._dotenv_path(), provider=self.provider_name()
+        )
 
     def _dotenv_path(self) -> Path | None:
         if self.dotenv_path is not None:
             return self.dotenv_path
         return configured_dotenv_path()
 
+    def provider_name(self) -> str:
+        try:
+            name = load_settings().provider
+            provider_spec(name)
+            return name
+        except Exception:
+            return "openai"
+
     def provider_api_key(self) -> str | None:
         try:
-            import os
-
-            value = os.environ.get("OPENAI_API_KEY")
-            if value:
-                return value
-            value = read_keyring_key()
-            if value:
-                return value
-            dotenv_path = self._dotenv_path()
-            if dotenv_path is not None:
-                return read_dotenv_key(dotenv_path)
+            credential = resolve_auth_credential(
+                dotenv_path=self._dotenv_path(), provider=self.provider_name()
+            )
         except Exception:
             return None
-        return None
+        return credential.value if credential is not None else None
 
     def provider_model(self) -> str:
         try:
-            return load_settings().model
+            return load_settings().active_model
         except Exception:
             return "gpt-5.5"
 
@@ -113,9 +257,17 @@ class VibeCADService:
         except Exception:
             return set()
 
-    def allow_primitive_provider_tools(self) -> bool:
+    def build_script_mode_enabled(self) -> bool:
+        """Whether the user opted into script mode (model.build_from_script).
+
+        Script mode is a deliberate, mutually exclusive choice: when enabled,
+        the provider authors geometry exclusively through FreeCAD Python
+        scripts and the structured write tools are hidden; when disabled
+        (the default), only the structured tools are available. Read and
+        view tools remain available in both modes.
+        """
         try:
-            return bool(load_settings().allow_primitive_provider_tools)
+            return bool(load_settings().enable_build_script)
         except Exception:
             return False
 
@@ -129,6 +281,16 @@ class VibeCADService:
         tool: Any,
         workbench: str | None = None,
     ) -> bool:
+        script_mode = self.build_script_mode_enabled()
+        if tool.name == BUILD_SCRIPT_TOOL_NAME:
+            return script_mode
+        if (
+            script_mode
+            and tool.safety
+            in {SafetyLevel.SAFE_WRITE, SafetyLevel.WRITE, SafetyLevel.DESTRUCTIVE}
+            and tool.name not in SCRIPT_MODE_ALLOWED_WRITE_TOOLS
+        ):
+            return False
         active = workbench or self.active_workbench_name()
         if tool.workbench and not self.is_workbench_tool_pack_enabled(tool.workbench):
             return False
@@ -227,7 +389,9 @@ class VibeCADService:
             if isinstance(value, (list, tuple)):
                 linked = [
                     summary
-                    for summary in (cls._linked_object_summary(child) for child in value[:20])
+                    for summary in (
+                        cls._linked_object_summary(child) for child in value[:20]
+                    )
                     if summary
                 ]
                 if linked:
@@ -274,7 +438,9 @@ class VibeCADService:
         return item
 
     @staticmethod
-    def _bounded_items(items: list[Any], limit: int) -> tuple[list[Any], dict[str, Any]]:
+    def _bounded_items(
+        items: list[Any], limit: int
+    ) -> tuple[list[Any], dict[str, Any]]:
         safe_limit = max(0, int(limit))
         total = len(items)
         visible = items[:safe_limit]
@@ -326,7 +492,11 @@ class VibeCADService:
                 "workbench": self.active_workbench_name(),
             }
         except Exception:
-            return {"size": None, "camera_type": None, "workbench": self.active_workbench_name()}
+            return {
+                "size": None,
+                "camera_type": None,
+                "workbench": self.active_workbench_name(),
+            }
 
     def task_panel_summary(self) -> dict[str, Any]:
         try:
@@ -345,7 +515,9 @@ class VibeCADService:
         except Exception as exc:
             return {"available": False, "reason": str(exc), "widgets": []}
 
-    def wait_for_user_gui_action(self, timeout_seconds: float | None = None) -> dict[str, Any]:
+    def wait_for_user_gui_action(
+        self, timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
         return self._registry.call(
             "core.wait_for_user_gui_action",
             timeout_seconds=timeout_seconds,
@@ -363,7 +535,10 @@ class VibeCADService:
                 from PySide6 import QtGui
             image = QtGui.QImage(str(path))
             if image.isNull():
-                return {"available": False, "error": "Screenshot image could not be loaded."}
+                return {
+                    "available": False,
+                    "error": "Screenshot image could not be loaded.",
+                }
             width = int(image.width())
             height = int(image.height())
             if width <= 0 or height <= 0:
@@ -388,10 +563,7 @@ class VibeCADService:
             y_steps = min(96, height)
             sampled = 0
             foreground = 0
-            foreground_grid = [
-                [False for _ in range(x_steps)]
-                for _ in range(y_steps)
-            ]
+            foreground_grid = [[False for _ in range(x_steps)] for _ in range(y_steps)]
             min_x = width
             min_y = height
             max_x = -1
@@ -442,10 +614,7 @@ class VibeCADService:
                 bbox_height = max(0, bbox[3] - bbox[1] + 1)
                 bbox_coverage = (bbox_width * bbox_height) / max(1, width * height)
 
-            visited = [
-                [False for _ in range(x_steps)]
-                for _ in range(y_steps)
-            ]
+            visited = [[False for _ in range(x_steps)] for _ in range(y_steps)]
             component_sizes: list[int] = []
             for grid_y in range(y_steps):
                 for grid_x in range(x_steps):
@@ -475,9 +644,7 @@ class VibeCADService:
             component_sizes.sort(reverse=True)
             component_count = len(component_sizes)
             largest_component_ratio = (
-                component_sizes[0] / max(1, foreground)
-                if component_sizes
-                else 0.0
+                component_sizes[0] / max(1, foreground) if component_sizes else 0.0
             )
             average_rgb = [
                 int(red_total / sampled) if sampled else 0,
@@ -542,6 +709,105 @@ class VibeCADService:
             return {"captured": False, "path": None}
         return dict(self._last_view_screenshot)
 
+    def _reference_artifact_dir(self) -> Path:
+        """Reference-image folder inside the per-document project directory.
+
+        Project roots always live under the central VibeCAD data dir, so
+        references are never written next to the CAD file. Without a project
+        context the fallback still lands inside ``vibecad_data_dir()``.
+        """
+        try:
+            project_context = self.project_context()
+        except Exception:
+            project_context = {}
+        root = project_context.get("root") if isinstance(project_context, dict) else None
+        if root:
+            return Path(str(root)).expanduser() / "references"
+        return vibecad_data_dir() / "references"
+
+    def attach_reference_image(self, source_path: str, label: str = "") -> dict[str, Any]:
+        """Copy a user-supplied reference image into the project artifact store.
+
+        Returns ``{"ok": True, "reference": {...}}`` on success or a structured
+        ``{"ok": False, "error": ...}`` result; never raises for bad input.
+        """
+        raw = str(source_path or "").strip()
+        if not raw:
+            return {"ok": False, "error": "Reference image path cannot be empty."}
+        source = Path(raw).expanduser()
+        suffix = source.suffix.lower()
+        if suffix not in REFERENCE_IMAGE_EXTENSIONS:
+            supported = ", ".join(sorted(ext.lstrip(".") for ext in REFERENCE_IMAGE_EXTENSIONS))
+            return {
+                "ok": False,
+                "error": (
+                    f"Unsupported reference image type '{suffix or source.name}'. "
+                    f"Supported formats: {supported}."
+                ),
+            }
+        if not source.is_file():
+            return {"ok": False, "error": f"Reference image not found: {source}"}
+        if len(self._reference_images) >= MAX_REFERENCE_IMAGES:
+            return {
+                "ok": False,
+                "error": (
+                    f"At most {MAX_REFERENCE_IMAGES} reference images may be "
+                    "attached; remove one first."
+                ),
+            }
+        try:
+            target_dir = self._reference_artifact_dir()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            reference_id = uuid.uuid4().hex[:12]
+            safe_name = _slug_filename(source.name)
+            target = target_dir / f"{reference_id}-{safe_name}"
+            shutil.copyfile(source, target)
+            size_bytes = target.stat().st_size
+        except OSError as exc:
+            return {"ok": False, "error": f"Could not copy reference image: {exc}"}
+        downscale = downscale_reference_image(target)
+        if downscale.get("size_bytes"):
+            size_bytes = int(downscale["size_bytes"])
+        entry: dict[str, Any] = {
+            "id": reference_id,
+            "name": source.name,
+            "label": str(label or "").strip(),
+            "path": str(target),
+            "size_bytes": size_bytes,
+            "image_size": downscale.get("image_size"),
+            "downscaled": bool(downscale.get("downscaled")),
+            "format": suffix.lstrip("."),
+            "artifact_role": "user_reference",
+            "attached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self._reference_images.append(entry)
+        return {"ok": True, "reference": dict(entry), "count": len(self._reference_images)}
+
+    def remove_reference_image(self, reference_id: str) -> dict[str, Any]:
+        ident = str(reference_id or "").strip()
+        if not ident:
+            return {"ok": False, "error": "Reference image id cannot be empty."}
+        for index, entry in enumerate(self._reference_images):
+            if entry.get("id") == ident or entry.get("name") == ident:
+                removed = self._reference_images.pop(index)
+                return {
+                    "ok": True,
+                    "removed": dict(removed),
+                    "count": len(self._reference_images),
+                }
+        return {"ok": False, "error": f"No attached reference image matches '{ident}'."}
+
+    def clear_reference_images(self) -> dict[str, Any]:
+        cleared = len(self._reference_images)
+        self._reference_images = []
+        return {"ok": True, "cleared": cleared}
+
+    def reference_images_summary(self) -> dict[str, Any]:
+        return {
+            "count": len(self._reference_images),
+            "images": [dict(entry) for entry in self._reference_images],
+        }
+
     def workbench_summary(self) -> dict[str, Any]:
         try:
             import FreeCADGui as Gui
@@ -583,7 +849,8 @@ class VibeCADService:
         prefixes = pack.command_prefixes if pack else ()
         if prefixes:
             commands = [
-                name for name in all_commands
+                name
+                for name in all_commands
                 if any(name.startswith(prefix) for prefix in prefixes)
             ]
         else:
@@ -599,7 +866,9 @@ class VibeCADService:
             "commands": commands[:MAX_CONTEXT_COMMANDS],
         }
 
-    def workbench_tool_pack_summary(self, workbench: str | None = None) -> dict[str, Any]:
+    def workbench_tool_pack_summary(
+        self, workbench: str | None = None
+    ) -> dict[str, Any]:
         active = workbench or self.active_workbench_name()
         pack = get_tool_pack(active)
         summary = pack.summary() if pack else None
@@ -619,7 +888,9 @@ class VibeCADService:
             tool_packs.append(item)
         return {"tool_packs": tool_packs, "disabled_workbenches": sorted(disabled)}
 
-    def workbench_object_templates(self, workbench: str | None = None) -> dict[str, Any]:
+    def workbench_object_templates(
+        self, workbench: str | None = None
+    ) -> dict[str, Any]:
         active = workbench or self.active_workbench_name()
         pack = get_tool_pack(active)
         return {
@@ -662,15 +933,25 @@ class VibeCADService:
     def object_property_summary(self, object_name: str) -> dict[str, Any]:
         doc = self._active_document()
         if doc is None:
-            return {"found": False, "error": "No active document.", "object": object_name}
+            return {
+                "found": False,
+                "error": "No active document.",
+                "object": object_name,
+            }
         obj = doc.getObject(object_name)
         if obj is None:
-            return {"found": False, "error": f"Object not found: {object_name}", "object": object_name}
+            return {
+                "found": False,
+                "error": f"Object not found: {object_name}",
+                "object": object_name,
+            }
 
         properties = {}
         for property_name in getattr(obj, "PropertiesList", []):
             try:
-                properties[property_name] = self._short_value(getattr(obj, property_name))
+                properties[property_name] = self._short_value(
+                    getattr(obj, property_name)
+                )
             except Exception as exc:
                 properties[property_name] = f"<unreadable: {exc}>"
         return {
@@ -696,7 +977,8 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
+            obj
+            for obj in doc.Objects
             if getattr(obj, "TypeId", "") == "Sketcher::SketchObject"
         ]
 
@@ -704,7 +986,10 @@ class VibeCADService:
         sketches = self._sketch_objects()
         if sketch_name:
             for sketch in sketches:
-                if sketch.Name == sketch_name or getattr(sketch, "Label", None) == sketch_name:
+                if (
+                    sketch.Name == sketch_name
+                    or getattr(sketch, "Label", None) == sketch_name
+                ):
                     return sketch
             return None
         return sketches[0] if sketches else None
@@ -751,9 +1036,19 @@ class VibeCADService:
             "handle": f"constraint:{index}",
             "type": getattr(constraint, "Type", constraint.__class__.__name__),
             "name": getattr(constraint, "Name", ""),
-            "driving": getattr(constraint, "Driving", getattr(constraint, "isDriving", None)),
+            "driving": getattr(
+                constraint, "Driving", getattr(constraint, "isDriving", None)
+            ),
         }
-        for attribute in ("First", "FirstPos", "Second", "SecondPos", "Third", "ThirdPos", "Value"):
+        for attribute in (
+            "First",
+            "FirstPos",
+            "Second",
+            "SecondPos",
+            "Third",
+            "ThirdPos",
+            "Value",
+        ):
             if hasattr(constraint, attribute):
                 try:
                     item[attribute.lower()] = getattr(constraint, attribute)
@@ -789,9 +1084,8 @@ class VibeCADService:
         for item in constraint_summaries:
             index = item["index"]
             name = item.get("name")
-            expression = (
-                expressions.get(f"Constraints[{index}]")
-                or expressions.get(f".Constraints[{index}]")
+            expression = expressions.get(f"Constraints[{index}]") or expressions.get(
+                f".Constraints[{index}]"
             )
             if name:
                 expression = (
@@ -844,7 +1138,9 @@ class VibeCADService:
         closed_loop = self._sketch_geometry_has_closed_profile(drawable_geometry)
         usable_shape_profile = bool(faces) or bool(edges)
         closed_profile = usable_shape_profile and (bool(faces) or closed_loop)
-        fully_constrained = degrees_of_freedom == 0 if degrees_of_freedom is not None else False
+        fully_constrained = (
+            degrees_of_freedom == 0 if degrees_of_freedom is not None else False
+        )
         ready = closed_profile and fully_constrained
         if ready:
             reason = "Sketch has a closed, fully constrained profile and can be used by PartDesign pad/pocket."
@@ -894,8 +1190,16 @@ class VibeCADService:
             end = getattr(item, "EndPoint", None)
             if start is None or end is None:
                 continue
-            endpoints.append((round(float(start.x), 6), round(float(start.y), 6), round(float(start.z), 6)))
-            endpoints.append((round(float(end.x), 6), round(float(end.y), 6), round(float(end.z), 6)))
+            endpoints.append(
+                (
+                    round(float(start.x), 6),
+                    round(float(start.y), 6),
+                    round(float(start.z), 6),
+                )
+            )
+            endpoints.append(
+                (round(float(end.x), 6), round(float(end.y), 6), round(float(end.z), 6))
+            )
         if len(endpoints) < 6 or len(endpoints) % 2:
             return False
         counts: dict[tuple[float, float, float], int] = {}
@@ -923,7 +1227,7 @@ class VibeCADService:
                         ),
                     },
                     {
-                        "tool": "sketcher.set_constraint_value",
+                        "tool": "sketcher.edit_constraint",
                         "why": "Set existing dimension constraints to the requested values before creating a feature.",
                     },
                 ]
@@ -933,19 +1237,22 @@ class VibeCADService:
                     "why": "Create a closed profile quickly when a rectangular solid is acceptable.",
                 },
                 {
-                    "tool": "sketcher.add_line",
-                    "why": "Add lines and coincident constraints until the profile is closed.",
+                    "tool": "sketcher.add_geometry",
+                    "why": "Add lines (kind='line') and coincident constraints until the profile is closed.",
                 },
             ]
         return [
             {
-                "tool": "partdesign.pad_sketch",
-                "arguments": {"sketch_name": status.get("sketch")},
+                "tool": "partdesign.extrude",
+                "arguments": {"operation": "pad", "sketch_name": status.get("sketch")},
                 "why": "The active sketch has a closed profile and is ready for an additive feature.",
             },
             {
-                "tool": "partdesign.pocket_sketch",
-                "arguments": {"sketch_name": status.get("sketch")},
+                "tool": "partdesign.extrude",
+                "arguments": {
+                    "operation": "pocket",
+                    "sketch_name": status.get("sketch"),
+                },
                 "why": "Use this sketch as a subtractive feature when it is mapped to a solid face.",
             },
         ]
@@ -971,12 +1278,18 @@ class VibeCADService:
 
     def _get_spreadsheet(self, sheet_name: str | None = None):
         sheets = [
-            obj for obj in (self._active_document().Objects if self._active_document() else [])
+            obj
+            for obj in (
+                self._active_document().Objects if self._active_document() else []
+            )
             if getattr(obj, "TypeId", "") == "Spreadsheet::Sheet"
         ]
         if sheet_name:
             for sheet in sheets:
-                if sheet.Name == sheet_name or getattr(sheet, "Label", None) == sheet_name:
+                if (
+                    sheet.Name == sheet_name
+                    or getattr(sheet, "Label", None) == sheet_name
+                ):
                     return sheet
             return None
         return sheets[0] if sheets else None
@@ -986,7 +1299,8 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
+            obj
+            for obj in doc.Objects
             if getattr(obj, "TypeId", "") == "Spreadsheet::Sheet"
         ]
 
@@ -1042,10 +1356,7 @@ class VibeCADService:
         doc = self._active_document()
         if doc is None:
             return []
-        return [
-            obj for obj in doc.Objects
-            if self._is_draft_object(obj)
-        ]
+        return [obj for obj in doc.Objects if self._is_draft_object(obj)]
 
     @staticmethod
     def _is_draft_object(obj: Any) -> bool:
@@ -1072,10 +1383,7 @@ class VibeCADService:
         }
         return (
             type_id.startswith("Part::Part2DObject")
-            or (
-                type_id == "Part::FeaturePython"
-                and proxy_type in draft_proxy_types
-            )
+            or (type_id == "Part::FeaturePython" and proxy_type in draft_proxy_types)
             or proxy_type.startswith("Draft")
         )
 
@@ -1092,7 +1400,11 @@ class VibeCADService:
             if hasattr(obj, property_name):
                 try:
                     value = getattr(obj, property_name)
-                    if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
+                    if (
+                        hasattr(value, "x")
+                        and hasattr(value, "y")
+                        and hasattr(value, "z")
+                    ):
                         item[property_name.lower()] = self._vector_summary(value)
                     else:
                         item[property_name.lower()] = self._short_value(value)
@@ -1114,7 +1426,8 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
+            obj
+            for obj in doc.Objects
             if getattr(obj, "TypeId", "") == "PartDesign::Body"
         ]
 
@@ -1147,8 +1460,7 @@ class VibeCADService:
 
     def _partdesign_body_summary(self, body: Any) -> dict[str, Any]:
         features = [
-            self._object_summary(item)
-            for item in list(getattr(body, "Group", []))[:80]
+            self._object_summary(item) for item in list(getattr(body, "Group", []))[:80]
         ]
         tip = getattr(body, "Tip", None)
         item = self._object_summary(body)
@@ -1156,21 +1468,22 @@ class VibeCADService:
         item["features"] = features
         item["tip"] = self._object_summary(tip) if tip else None
         base_feature = getattr(body, "BaseFeature", None)
-        item["base_feature"] = self._object_summary(base_feature) if base_feature else None
+        item["base_feature"] = (
+            self._object_summary(base_feature) if base_feature else None
+        )
         return item
 
     def partdesign_summary(self, body_name: str | None = None) -> dict[str, Any]:
         bodies = self._partdesign_bodies()
         selected = self._get_partdesign_body(body_name)
         return {
-            "document": self._active_document().Name if self._active_document() else None,
+            "document": self._active_document().Name
+            if self._active_document()
+            else None,
             "body_count": len(bodies),
             "requested": body_name,
             "selected": self._partdesign_body_summary(selected) if selected else None,
-            "bodies": [
-                self._partdesign_body_summary(body)
-                for body in bodies[:20]
-            ],
+            "bodies": [self._partdesign_body_summary(body) for body in bodies[:20]],
         }
 
     def _techdraw_pages(self) -> list[Any]:
@@ -1201,7 +1514,9 @@ class VibeCADService:
         for property_name in ("X", "Y", "Scale"):
             if hasattr(view, property_name):
                 try:
-                    item[property_name.lower()] = self._short_value(getattr(view, property_name))
+                    item[property_name.lower()] = self._short_value(
+                        getattr(view, property_name)
+                    )
                 except Exception:
                     continue
         sources = []
@@ -1217,10 +1532,7 @@ class VibeCADService:
         views = list(getattr(page, "Views", []) or [])
         item["template"] = self._object_summary(template) if template else None
         item["view_count"] = len(views)
-        item["views"] = [
-            self._techdraw_view_summary(view)
-            for view in views[:50]
-        ]
+        item["views"] = [self._techdraw_view_summary(view) for view in views[:50]]
         if hasattr(page, "Scale"):
             try:
                 item["scale"] = self._short_value(getattr(page, "Scale"))
@@ -1237,10 +1549,7 @@ class VibeCADService:
             "page_count": len(pages),
             "requested": page_name,
             "selected": self._techdraw_page_summary(selected) if selected else None,
-            "pages": [
-                self._techdraw_page_summary(page)
-                for page in pages[:20]
-            ],
+            "pages": [self._techdraw_page_summary(page) for page in pages[:20]],
         }
 
     def _fem_analyses(self) -> list[Any]:
@@ -1261,7 +1570,10 @@ class VibeCADService:
         analyses = self._fem_analyses()
         if analysis_name:
             for analysis in analyses:
-                if analysis.Name == analysis_name or getattr(analysis, "Label", None) == analysis_name:
+                if (
+                    analysis.Name == analysis_name
+                    or getattr(analysis, "Label", None) == analysis_name
+                ):
                     return analysis
             return None
         return analyses[0] if analyses else None
@@ -1309,8 +1621,7 @@ class VibeCADService:
             "requested": analysis_name,
             "selected": self._fem_analysis_summary(selected) if selected else None,
             "analyses": [
-                self._fem_analysis_summary(analysis)
-                for analysis in analyses[:20]
+                self._fem_analysis_summary(analysis) for analysis in analyses[:20]
             ],
         }
 
@@ -1328,10 +1639,7 @@ class VibeCADService:
         doc = self._active_document()
         if doc is None:
             return []
-        return [
-            obj for obj in doc.Objects
-            if self._is_cam_job(obj)
-        ]
+        return [obj for obj in doc.Objects if self._is_cam_job(obj)]
 
     def _get_cam_job(self, job_name: str | None = None):
         jobs = self._cam_jobs()
@@ -1348,10 +1656,7 @@ class VibeCADService:
         objects = list(getattr(group, "Group", []) or [])
         item = self._object_summary(group)
         item["object_count"] = len(objects)
-        item["objects"] = [
-            self._object_summary(obj)
-            for obj in objects[:80]
-        ]
+        item["objects"] = [self._object_summary(obj) for obj in objects[:80]]
         return item
 
     def _cam_job_summary(self, job: Any) -> dict[str, Any]:
@@ -1374,10 +1679,7 @@ class VibeCADService:
             "job_count": len(jobs),
             "requested": job_name,
             "selected": self._cam_job_summary(selected) if selected else None,
-            "jobs": [
-                self._cam_job_summary(job)
-                for job in jobs[:20]
-            ],
+            "jobs": [self._cam_job_summary(job) for job in jobs[:20]],
         }
 
     @staticmethod
@@ -1387,7 +1689,8 @@ class VibeCADService:
         return (
             type_id.startswith(("Arch::", "BIM::"))
             or hasattr(obj, "IfcType")
-            or proxy_type in {
+            or proxy_type
+            in {
                 "Building",
                 "BuildingPart",
                 "Component",
@@ -1404,10 +1707,7 @@ class VibeCADService:
         doc = self._active_document()
         if doc is None:
             return []
-        return [
-            obj for obj in doc.Objects
-            if self._is_bim_object(obj)
-        ]
+        return [obj for obj in doc.Objects if self._is_bim_object(obj)]
 
     def _bim_object_summary(self, obj: Any) -> dict[str, Any]:
         item = self._object_summary(obj)
@@ -1415,14 +1715,13 @@ class VibeCADService:
         item["ifc_type"] = getattr(obj, "IfcType", None)
         children = list(getattr(obj, "Group", []) or [])
         item["child_count"] = len(children)
-        item["children"] = [
-            self._object_summary(child)
-            for child in children[:60]
-        ]
+        item["children"] = [self._object_summary(child) for child in children[:60]]
         for property_name in ("CompositionType", "Height"):
             if hasattr(obj, property_name):
                 try:
-                    item[property_name.lower()] = self._short_value(getattr(obj, property_name))
+                    item[property_name.lower()] = self._short_value(
+                        getattr(obj, property_name)
+                    )
                 except Exception:
                     continue
         return item
@@ -1438,10 +1737,7 @@ class VibeCADService:
             "document": doc.Name if doc else None,
             "object_count": len(objects),
             "ifc_type_counts": ifc_counts,
-            "objects": [
-                self._bim_object_summary(obj)
-                for obj in objects[:80]
-            ],
+            "objects": [self._bim_object_summary(obj) for obj in objects[:80]],
         }
 
     def _assembly_objects(self) -> list[Any]:
@@ -1462,7 +1758,10 @@ class VibeCADService:
         assemblies = self._assembly_objects()
         if assembly_name:
             for assembly in assemblies:
-                if assembly.Name == assembly_name or getattr(assembly, "Label", None) == assembly_name:
+                if (
+                    assembly.Name == assembly_name
+                    or getattr(assembly, "Label", None) == assembly_name
+                ):
                     return assembly
             return None
         return assemblies[0] if assemblies else None
@@ -1547,18 +1846,17 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
-            if getattr(obj, "TypeId", "") in {"Inspection::Feature", "Inspection::Group"}
+            obj
+            for obj in doc.Objects
+            if getattr(obj, "TypeId", "")
+            in {"Inspection::Feature", "Inspection::Group"}
         ]
 
     def _inspection_candidates(self) -> list[Any]:
         doc = self._active_document()
         if doc is None:
             return []
-        return [
-            obj for obj in doc.Objects
-            if self._is_inspection_geometry(obj)
-        ]
+        return [obj for obj in doc.Objects if self._is_inspection_geometry(obj)]
 
     @staticmethod
     def _inspection_distances_count(feature: Any) -> int:
@@ -1577,10 +1875,13 @@ class VibeCADService:
         item = self._object_summary(obj)
         if getattr(obj, "TypeId", "") == "Inspection::Group":
             group = list(getattr(obj, "Group", []) or [])
-            item["feature_count"] = len([
-                child for child in group
-                if getattr(child, "TypeId", "") == "Inspection::Feature"
-            ])
+            item["feature_count"] = len(
+                [
+                    child
+                    for child in group
+                    if getattr(child, "TypeId", "") == "Inspection::Feature"
+                ]
+            )
             item["children"] = [self._object_summary(child) for child in group[:40]]
             return item
 
@@ -1597,8 +1898,14 @@ class VibeCADService:
     def inspection_summary(self) -> dict[str, Any]:
         objects = self._inspection_features()
         candidates = self._inspection_candidates()
-        groups = [obj for obj in objects if getattr(obj, "TypeId", "") == "Inspection::Group"]
-        features = [obj for obj in objects if getattr(obj, "TypeId", "") == "Inspection::Feature"]
+        groups = [
+            obj for obj in objects if getattr(obj, "TypeId", "") == "Inspection::Group"
+        ]
+        features = [
+            obj
+            for obj in objects
+            if getattr(obj, "TypeId", "") == "Inspection::Feature"
+        ]
         doc = self._active_document()
         return {
             "document": doc.Name if doc else None,
@@ -1606,7 +1913,9 @@ class VibeCADService:
             "feature_count": len(features),
             "candidate_count": len(candidates),
             "groups": [self._inspection_feature_summary(obj) for obj in groups[:40]],
-            "features": [self._inspection_feature_summary(obj) for obj in features[:80]],
+            "features": [
+                self._inspection_feature_summary(obj) for obj in features[:80]
+            ],
             "candidates": [self._object_summary(obj) for obj in candidates[:80]],
         }
 
@@ -1716,447 +2025,13 @@ class VibeCADService:
     def action_history(self) -> dict[str, Any]:
         return {"history": self._approvals.history()}
 
-    def phase_context(self) -> dict[str, Any]:
+    def project_context(self) -> dict[str, Any]:
         return self._project_store.context()
 
-    def set_phase(self, phase: str, reason: str = "", requested_by: str = "user") -> dict[str, Any]:
-        return self._project_store.set_phase(
-            phase,
-            reason=reason,
-            requested_by=requested_by,
-        )
-
-    def update_intent_brief(
-        self,
-        *,
-        title: str = "",
-        summary: str = "",
-        requirements: dict[str, Any] | None = None,
-        assumptions: list[str] | None = None,
-        open_questions: list[str] | None = None,
-        acceptance_criteria: list[str] | None = None,
-        readiness_score: int | float | None = None,
-        ready_for_next_phase: bool | None = None,
-        tags: list[str] | None = None,
+    def update_project_summary(
+        self, *, title: str = "", summary: str = ""
     ) -> dict[str, Any]:
-        return self._project_store.update_intent_brief(
-            title=title,
-            summary=summary,
-            requirements=requirements or {},
-            assumptions=assumptions,
-            open_questions=open_questions,
-            acceptance_criteria=acceptance_criteria,
-            readiness_score=readiness_score,
-            ready_for_next_phase=ready_for_next_phase,
-            tags=tags,
-        )
-
-    def approve_intent_brief(
-        self,
-        approved_by: str = "user",
-        notes: str = "",
-        transition_to_design: bool = True,
-    ) -> dict[str, Any]:
-        return self._project_store.approve_intent_brief(
-            approved_by=approved_by,
-            notes=notes,
-            transition_to_design=transition_to_design,
-        )
-
-    def phase_allowed_workbenches(self, phase: str | None = None) -> tuple[str, ...]:
-        context = self.phase_context()
-        target_phase = normalize_phase(phase or context.get("active_phase") or "intent")
-        return tuple(PHASE_SPECS[target_phase]["allowed_workbenches"])
-
-    def validate_phase_document(self, phase: str | None = None) -> dict[str, Any]:
-        context = self.phase_context()
-        target_phase = normalize_phase(phase or context.get("active_phase") or "intent")
-        intent = context.get("intent", {}) if isinstance(context, dict) else {}
-        approved = bool(intent.get("approved"))
-        gates: list[dict[str, Any]] = []
-
-        def add_gate(name: str, passed: bool, evidence: Any = None) -> None:
-            gates.append({"name": name, "passed": bool(passed), "evidence": evidence})
-
-        add_gate("approved_intent_contract", target_phase == "intent" or approved)
-        if target_phase == "intent":
-            readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
-            add_gate("intent_brief_exists", bool(intent.get("brief")))
-            add_gate(
-                "intent_ready_for_approval",
-                bool(readiness.get("ready_for_next_phase")),
-                readiness,
-            )
-        elif target_phase == "design":
-            document = self.document_summary()
-            objects = document.get("objects", []) if isinstance(document, dict) else []
-            solids = sum(
-                int((item.get("shape") or {}).get("solids", 0) or 0)
-                for item in objects
-                if isinstance(item, dict)
-            )
-            partdesign = self.partdesign_summary()
-            native_features = 0
-            for body in partdesign.get("bodies", []) or []:
-                for feature in body.get("features", []) or []:
-                    type_id = str(feature.get("type") or "")
-                    if type_id.startswith("PartDesign::") and type_id not in {
-                        "PartDesign::Body",
-                        "PartDesign::CoordinateSystem",
-                        "PartDesign::Origin",
-                    }:
-                        native_features += 1
-            add_gate("document_has_objects", int(document.get("object_count", 0) or 0) > 0, document.get("object_count"))
-            add_gate("document_has_solid_geometry", solids > 0, {"solid_count": solids})
-            add_gate("partdesign_or_direct_features_exist", native_features > 0 or solids > 0, {"native_feature_count": native_features})
-        elif target_phase == "assembly":
-            assembly = self.assembly_summary()
-            assemblies = assembly.get("assemblies", []) or []
-            component_count = 0
-            joint_count = 0
-            for item in assemblies:
-                if not isinstance(item, dict):
-                    continue
-                component_count = max(component_count, int(item.get("components", 0) or 0))
-                joint_count = max(joint_count, int(item.get("joints", 0) or 0))
-            add_gate("native_assembly_exists", int(assembly.get("assembly_count", 0) or 0) > 0, assembly.get("assembly_count"))
-            add_gate("multiple_components_exist", component_count >= 2, {"component_count": component_count})
-            add_gate("assembly_relationships_exist", joint_count > 0 or component_count >= 2, {"joint_count": joint_count})
-        elif target_phase == "analysis":
-            fem = self.fem_summary()
-            selected = fem.get("selected") or {}
-            categories = selected.get("member_categories", {}) if isinstance(selected, dict) else {}
-            add_gate("fem_analysis_exists", int(fem.get("analysis_count", 0) or 0) > 0, fem.get("analysis_count"))
-            add_gate("material_load_constraint_or_mesh_evidence", bool(categories), categories)
-        elif target_phase == "manufacturing":
-            cam = self.cam_summary()
-            add_gate("cam_job_exists", int(cam.get("job_count", 0) or 0) > 0, cam.get("job_count"))
-            selected = cam.get("selected") or {}
-            add_gate("cam_job_has_model_or_operations", bool(selected.get("model") or selected.get("operations")), selected)
-
-        failures = [gate for gate in gates if not gate["passed"]]
-        return {
-            "ok": not failures,
-            "phase": target_phase,
-            "project_id": context.get("project_id"),
-            "gates": gates,
-            "failures": failures,
-            "next_action": (
-                "Phase evidence is sufficient for review."
-                if not failures
-                else "Resolve failed gates before reporting this phase complete."
-            ),
-        }
-
-    def phase_workflow_audit(self) -> dict[str, Any]:
-        from VibeCADSession import (
-            DOCUMENT_MANAGEMENT_TOOLS,
-            NON_GEOMETRY_PROVIDER_WRITE_TOOLS,
-            PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS,
-            _apply_phase_provider_surface,
-            _apply_request_policy_provider_surface,
-            _request_policy,
-        )
-
-        base_context = self.phase_context()
-        active_workbench = self.active_workbench_name()
-        gates: list[dict[str, Any]] = []
-
-        def add_gate(name: str, passed: bool, evidence: Any = None) -> None:
-            gates.append({"name": name, "passed": bool(passed), "evidence": evidence})
-
-        def phase_context_for(phase: str, *, approved: bool) -> dict[str, Any]:
-            normalized = normalize_phase(phase)
-            spec = dict(PHASE_SPECS[normalized])
-            context = dict(base_context)
-            context["active_phase"] = normalized
-            context["phase"] = {
-                "name": normalized,
-                "label": spec["label"],
-                "goal": spec["goal"],
-                "allowed_workbenches": list(spec["allowed_workbenches"]),
-                "requires_approved_intent": bool(spec["requires_approved_intent"]),
-                "success_gates": list(spec["success_gates"]),
-            }
-            intent = dict(context.get("intent", {}) if isinstance(context.get("intent"), dict) else {})
-            intent["approved"] = bool(approved)
-            if approved and not intent.get("brief"):
-                intent["brief"] = {
-                    "schema": "vibecad-audit-placeholder",
-                    "summary": "Synthetic approved intent used only for workflow surface auditing.",
-                }
-            context["intent"] = intent
-            return context
-
-        def geometry_write_tool_names(tool_names: set[str]) -> list[str]:
-            result: list[str] = []
-            for name in sorted(tool_names):
-                try:
-                    tool = self.registry.get(name)
-                except KeyError:
-                    continue
-                if tool.safety is SafetyLevel.SAFE_WRITE and name not in NON_GEOMETRY_PROVIDER_WRITE_TOOLS:
-                    result.append(name)
-            return result
-
-        def sample_surface(
-            label: str,
-            phase: str,
-            *,
-            approved: bool,
-            entered_workspace: str | None = None,
-            prompt: str | None = None,
-            synthetic_object_count: int | None = None,
-        ) -> dict[str, Any]:
-            context: dict[str, Any] = {}
-            _apply_phase_provider_surface(
-                self,
-                context,
-                active_workbench,
-                phase_context=phase_context_for(phase, approved=approved),
-                entered_workspace=entered_workspace,
-            )
-            if synthetic_object_count is not None:
-                context["document"] = {"object_count": int(synthetic_object_count)}
-            if prompt is not None:
-                request_policy = _request_policy(prompt, context)
-                context["vibecad_request"] = request_policy
-                _apply_request_policy_provider_surface(self, context, request_policy)
-            schemas = context.get("provider_tool_schemas", [])
-            if not isinstance(schemas, list):
-                surface = context.get("provider_tool_surface", {})
-                schemas = surface.get("tools", []) if isinstance(surface, dict) else []
-            tool_names = {
-                str(schema.get("name") or "")
-                for schema in schemas
-                if isinstance(schema, dict) and schema.get("name")
-            }
-            surface = context.get("provider_tool_surface", {})
-            scope = surface.get("scope", {}) if isinstance(surface, dict) else {}
-            workspace = context.get("vibecad_workspace", {})
-            request = context.get("vibecad_request", {})
-            document_management = sorted(tool_names.intersection(DOCUMENT_MANAGEMENT_TOOLS))
-            return {
-                "label": label,
-                "phase": normalize_phase(phase),
-                "approved_intent": bool(approved),
-                "entered_workspace": entered_workspace,
-                "scope": dict(scope) if isinstance(scope, dict) else {},
-                "workspace": dict(workspace) if isinstance(workspace, dict) else {},
-                "request": dict(request) if isinstance(request, dict) else {},
-                "tool_count": len(tool_names),
-                "tool_names": sorted(tool_names),
-                "document_management_tools": document_management,
-                "geometry_write_tools": geometry_write_tool_names(tool_names),
-            }
-
-        samples: dict[str, dict[str, Any]] = {
-            "intent": sample_surface("intent", "intent", approved=False),
-            "design_unapproved_gate": sample_surface(
-                "design_unapproved_gate",
-                "design",
-                approved=False,
-            ),
-            "design_planner": sample_surface("design_planner", "design", approved=True),
-            "design_partdesign_workspace": sample_surface(
-                "design_partdesign_workspace",
-                "design",
-                approved=True,
-                entered_workspace="PartDesignWorkbench",
-            ),
-            "design_rejects_assembly_workspace": sample_surface(
-                "design_rejects_assembly_workspace",
-                "design",
-                approved=True,
-                entered_workspace="AssemblyWorkbench",
-            ),
-            "assembly_assembly_workspace": sample_surface(
-                "assembly_assembly_workspace",
-                "assembly",
-                approved=True,
-                entered_workspace="AssemblyWorkbench",
-            ),
-            "modify_existing_partdesign_workspace": sample_surface(
-                "modify_existing_partdesign_workspace",
-                "design",
-                approved=True,
-                entered_workspace="PartDesignWorkbench",
-                prompt="optimize this model",
-                synthetic_object_count=1,
-            ),
-            "modify_existing_part_workspace": sample_surface(
-                "modify_existing_part_workspace",
-                "design",
-                approved=True,
-                entered_workspace="PartWorkbench",
-                prompt="fix this model",
-                synthetic_object_count=1,
-            ),
-        }
-        for phase in ("assembly", "analysis", "manufacturing"):
-            samples[f"{phase}_planner"] = sample_surface(
-                f"{phase}_planner",
-                phase,
-                approved=True,
-            )
-
-        intent_names = set(samples["intent"]["tool_names"])
-        design_gate_names = set(samples["design_unapproved_gate"]["tool_names"])
-        planner_names = set(samples["design_planner"]["tool_names"])
-        design_workspace_names = set(samples["design_partdesign_workspace"]["tool_names"])
-        disallowed_names = set(samples["design_rejects_assembly_workspace"]["tool_names"])
-        assembly_names = set(samples["assembly_assembly_workspace"]["tool_names"])
-        modify_existing_names = set(samples["modify_existing_partdesign_workspace"]["tool_names"])
-        modify_existing_part_names = set(samples["modify_existing_part_workspace"]["tool_names"])
-
-        add_gate(
-            "intent_surface_has_no_geometry_or_document_lifecycle_tools",
-            not samples["intent"]["geometry_write_tools"]
-            and not samples["intent"]["document_management_tools"]
-            and "intent.update_brief" in intent_names,
-            {
-                "geometry_write_tools": samples["intent"]["geometry_write_tools"],
-                "document_management_tools": samples["intent"]["document_management_tools"],
-                "required_tool_present": "intent.update_brief" in intent_names,
-            },
-        )
-        add_gate(
-            "downstream_phases_require_approved_intent_before_authoring",
-            samples["design_unapproved_gate"]["scope"].get("phase") == "intent_gate_required"
-            and not samples["design_unapproved_gate"]["geometry_write_tools"]
-            and "intent.update_brief" in design_gate_names,
-            {
-                "scope": samples["design_unapproved_gate"]["scope"],
-                "geometry_write_tools": samples["design_unapproved_gate"]["geometry_write_tools"],
-            },
-        )
-        add_gate(
-            "approved_phase_starts_with_planner_not_geometry_tools",
-            samples["design_planner"]["scope"].get("phase") == "design_workspace_planner"
-            and "core.enter_workspace" in planner_names
-            and not samples["design_planner"]["geometry_write_tools"]
-            and "partdesign.create_body" not in planner_names,
-            {
-                "scope": samples["design_planner"]["scope"],
-                "has_enter_workspace": "core.enter_workspace" in planner_names,
-                "geometry_write_tools": samples["design_planner"]["geometry_write_tools"],
-            },
-        )
-        add_gate(
-            "entered_design_workspace_exposes_useful_part_design_tools",
-            {
-                "partdesign.create_body",
-                "partdesign.create_sketch",
-                "partdesign.pad_sketch",
-                "sketcher.add_hole_pattern",
-            }.issubset(design_workspace_names)
-            and "intent.update_brief" not in design_workspace_names,
-            {
-                "required_present": sorted(
-                    {
-                        "partdesign.create_body",
-                        "partdesign.create_sketch",
-                        "partdesign.pad_sketch",
-                        "sketcher.add_hole_pattern",
-                    }.intersection(design_workspace_names)
-                ),
-                "intent_update_visible": "intent.update_brief" in design_workspace_names,
-            },
-        )
-        add_gate(
-            "disallowed_workspace_does_not_expose_wrong_phase_tools",
-            samples["design_rejects_assembly_workspace"]["scope"].get("phase")
-            == "design_workspace_planner"
-            and "assembly.create_assembly" not in disallowed_names
-            and samples["design_rejects_assembly_workspace"]["workspace"].get("blocked_workspace")
-            == "AssemblyWorkbench",
-            {
-                "scope": samples["design_rejects_assembly_workspace"]["scope"],
-                "blocked_workspace": samples["design_rejects_assembly_workspace"]["workspace"].get("blocked_workspace"),
-                "assembly_create_visible": "assembly.create_assembly" in disallowed_names,
-            },
-        )
-        add_gate(
-            "assembly_phase_keeps_assembly_tools_in_assembly_workspace",
-            {"assembly.create_assembly", "assembly.add_component"}.issubset(assembly_names),
-            {
-                "required_present": sorted(
-                    {"assembly.create_assembly", "assembly.add_component"}.intersection(assembly_names)
-                )
-            },
-        )
-        document_leaks = {
-            label: sample["document_management_tools"]
-            for label, sample in samples.items()
-            if sample["document_management_tools"]
-        }
-        add_gate(
-            "document_lifecycle_tools_hidden_from_all_phase_surfaces",
-            not document_leaks,
-            document_leaks,
-        )
-        audit_missing = [
-            label for label, sample in samples.items()
-            if "phase.audit_workflow" not in set(sample["tool_names"])
-        ]
-        add_gate(
-            "workflow_audit_tool_visible_on_phase_surfaces",
-            not audit_missing,
-            {"missing_from": audit_missing},
-        )
-        hidden_modify_tools = set(
-            samples["modify_existing_partdesign_workspace"]["request"].get("hidden_provider_tools", [])
-        )
-        hidden_part_modify_tools = set(
-            samples["modify_existing_part_workspace"]["request"].get("hidden_provider_tools", [])
-        )
-        add_gate(
-            "modify_existing_request_hides_replacement_entry_points",
-            "partdesign.create_body" not in modify_existing_names
-            and "part.create_primitive" not in modify_existing_names
-            and "partdesign.create_sketch" in modify_existing_names
-            and "partdesign.create_body" in hidden_modify_tools,
-            {
-                "hidden_provider_tools": sorted(hidden_modify_tools),
-                "replacement_entrypoints_hidden": sorted(
-                    set(PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS).intersection(hidden_modify_tools)
-                ),
-                "partdesign_create_sketch_visible": "partdesign.create_sketch" in modify_existing_names,
-            },
-        )
-        add_gate(
-            "modify_existing_request_keeps_in_place_correction_tools",
-            "part.create_primitive" not in modify_existing_part_names
-            and "core.delete_object" not in modify_existing_part_names
-            and "part.set_primitive_dimensions" in modify_existing_part_names
-            and "part.apply_fillet" in modify_existing_part_names
-            and "part.create_primitive" in hidden_part_modify_tools,
-            {
-                "hidden_provider_tools": sorted(hidden_part_modify_tools),
-                "part_set_dimensions_visible": "part.set_primitive_dimensions" in modify_existing_part_names,
-                "part_apply_fillet_visible": "part.apply_fillet" in modify_existing_part_names,
-            },
-        )
-
-        failures = [gate for gate in gates if not gate["passed"]]
-        return {
-            "ok": not failures,
-            "schema": "vibecad-phase-workflow-audit-v1",
-            "active_phase": normalize_phase(str(base_context.get("active_phase") or "intent")),
-            "active_workbench": active_workbench,
-            "intent_approved": bool(
-                isinstance(base_context.get("intent"), dict)
-                and base_context["intent"].get("approved")
-            ),
-            "gates": gates,
-            "failures": failures,
-            "surface_samples": samples,
-            "next_action": (
-                "Phase workflow tool boundaries are intact."
-                if not failures
-                else "Fix failed gates before trusting autonomous provider context for CAD authoring."
-            ),
-        }
+        return self._project_store.update_summary(title=title, summary=summary)
 
     def queue_steering_message(self, text: str, source: str = "user") -> dict[str, Any]:
         clean = str(text or "").strip()
@@ -2187,34 +2062,44 @@ class VibeCADService:
 
     def steering_state(self) -> dict[str, Any]:
         return {
-            "queued_count": len([item for item in self._steering_messages if not item.get("consumed")]),
+            "queued_count": len(
+                [item for item in self._steering_messages if not item.get("consumed")]
+            ),
             "messages": [dict(item) for item in self._steering_messages[-20:]],
         }
 
     def _conversation_scope(self) -> dict[str, Any]:
-        doc = self._active_document()
-        if doc is not None:
-            filename = str(getattr(doc, "FileName", "") or "")
-            if filename:
-                file_path = Path(filename)
-                return {
-                    "kind": "saved_document",
-                    "document": str(getattr(doc, "Name", "")),
-                    "file_path": str(file_path),
-                    "path": str(file_path.with_name(f"{file_path.name}.vibecad-chat.json")),
-                    "persistent": True,
-                }
-            name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(getattr(doc, "Name", "document")))
+        """Where the active conversation lives.
+
+        Conversations are stored alongside the project manifest in the
+        per-document project folder under the central VibeCAD data dir —
+        never next to the CAD file. Legacy ``.vibecad-chat.json`` sidecars
+        are exposed via ``legacy_path`` for read-only migration.
+        """
+        project = self._project_store.project_scope()
+        root = Path(str(project["root"]))
+        path = root / "conversation.json"
+        doc_info = project.get("document") or {}
+        document_name = str(doc_info.get("document") or "")
+        file_path = doc_info.get("file_path")
+        if file_path:
+            legacy = Path(str(file_path))
+            return {
+                "kind": "saved_document",
+                "document": document_name,
+                "file_path": str(file_path),
+                "path": str(path),
+                "legacy_path": str(
+                    legacy.with_name(f"{legacy.name}.vibecad-chat.json")
+                ),
+                "persistent": True,
+            }
+        if document_name:
             return {
                 "kind": "unsaved_document",
-                "document": str(getattr(doc, "Name", "")),
+                "document": document_name,
                 "file_path": None,
-                "path": str(
-                    _vibecad_user_data_dir()
-                    / "conversations"
-                    / f"unsaved-{self._local_session_id}"
-                    / f"{name}.vibecad-chat.json"
-                ),
+                "path": str(path),
                 "persistent": True,
                 "document_saved": False,
             }
@@ -2222,12 +2107,7 @@ class VibeCADService:
             "kind": "no_document",
             "document": None,
             "file_path": None,
-            "path": str(
-                _vibecad_user_data_dir()
-                / "conversations"
-                / f"session-{self._local_session_id}"
-                / "freecad.vibecad-chat.json"
-            ),
+            "path": str(path),
             "persistent": True,
             "document_saved": False,
         }
@@ -2235,7 +2115,9 @@ class VibeCADService:
     def _conversation_path(self) -> Path:
         return Path(str(self._conversation_scope()["path"]))
 
-    def _load_conversation_for_active_document(self) -> tuple[Path, list[dict[str, Any]]]:
+    def _load_conversation_for_active_document(
+        self,
+    ) -> tuple[Path, list[dict[str, Any]]]:
         scope = self._conversation_scope()
         path = Path(str(scope["path"]))
         key = str(path)
@@ -2243,9 +2125,19 @@ class VibeCADService:
             return path, list(self._conversation_cache)
 
         loaded: list[dict[str, Any]] = []
+        migrated_from_legacy = False
         try:
-            if bool(scope.get("persistent")) and path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
+            source: Path | None = None
+            if bool(scope.get("persistent")):
+                if path.exists():
+                    source = path
+                else:
+                    legacy = str(scope.get("legacy_path") or "")
+                    if legacy and Path(legacy).exists():
+                        source = Path(legacy)
+                        migrated_from_legacy = True
+            if source is not None:
+                data = json.loads(source.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     turns = data.get("conversation", [])
                 else:
@@ -2259,11 +2151,18 @@ class VibeCADService:
                     ][-MAX_CONVERSATION_TURNS:]
         except Exception:
             loaded = []
+            migrated_from_legacy = False
         self._conversation_cache_key = key
         self._conversation_cache = loaded
+        if migrated_from_legacy and loaded:
+            # One-time migration: persist the legacy sidecar content in the
+            # new project-folder location. The legacy file is left untouched.
+            self._write_conversation(path, loaded)
         return path, list(self._conversation_cache)
 
-    def _write_conversation(self, path: Path, conversation: list[dict[str, Any]]) -> None:
+    def _write_conversation(
+        self, path: Path, conversation: list[dict[str, Any]]
+    ) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
@@ -2273,18 +2172,21 @@ class VibeCADService:
                 "conversation": conversation[-MAX_CONVERSATION_TURNS:],
             }
             tmp = path.with_name(f"{path.name}.tmp")
-            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
             tmp.replace(path)
         except Exception:
             pass
 
     @staticmethod
     def conversation_path_for_document_file(file_path: str | Path) -> Path:
-        path = Path(str(file_path))
-        return path.with_name(f"{path.name}.vibecad-chat.json")
+        return project_root_for_document_file(file_path) / "conversation.json"
 
     @staticmethod
-    def _clean_conversation_turns(conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _clean_conversation_turns(
+        conversation: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         cleaned: list[dict[str, Any]] = []
         for item in conversation:
             if not isinstance(item, dict):
@@ -2352,7 +2254,10 @@ class VibeCADService:
                     ):
                         return self.conversation_history()
             latest = conversation[-1]
-            if latest.get("role") == role and str(latest.get("content", "")).strip() == clean_content:
+            if (
+                latest.get("role") == role
+                and str(latest.get("content", "")).strip() == clean_content
+            ):
                 return self.conversation_history()
         entry: dict[str, Any] = {
             "role": role,
@@ -2426,28 +2331,6 @@ class VibeCADService:
             "tools": tools,
         }
 
-    def provider_phase_tool_surface(
-        self,
-        workbench: str | None = None,
-        entered_workspace: str | None = None,
-    ) -> dict[str, Any]:
-        from VibeCADSession import _apply_phase_provider_surface
-
-        active = workbench if workbench is not None else self.active_workbench_name()
-        context = self.provider_context_summary()
-        phase_context = self.phase_context()
-        _apply_phase_provider_surface(
-            self,
-            context,
-            active,
-            phase_context=phase_context,
-            entered_workspace=entered_workspace,
-        )
-        surface = context.get("provider_tool_surface")
-        if isinstance(surface, dict):
-            return surface
-        return self.provider_tool_surface(active)
-
     def is_provider_tool_available(
         self,
         tool_name: str,
@@ -2455,7 +2338,9 @@ class VibeCADService:
     ) -> bool:
         from VibeCADSession import is_provider_safe_tool
 
-        return is_provider_safe_tool(self, tool_name, workbench or self.active_workbench_name())
+        return is_provider_safe_tool(
+            self, tool_name, workbench or self.active_workbench_name()
+        )
 
     def reject_action(self, action_id: str) -> dict[str, Any]:
         return self._registry.call("core.reject_action", action_id=action_id)
@@ -2471,7 +2356,8 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
+            obj
+            for obj in doc.Objects
             if getattr(obj, "TypeId", "").startswith("Surface::")
         ]
 
@@ -2523,7 +2409,9 @@ class VibeCADService:
         ):
             if hasattr(obj, property_name):
                 try:
-                    item[property_name.lower()] = self._short_value(getattr(obj, property_name))
+                    item[property_name.lower()] = self._short_value(
+                        getattr(obj, property_name)
+                    )
                 except Exception:
                     continue
         return item
@@ -2564,7 +2452,9 @@ class VibeCADService:
             try:
                 item["points"] = {
                     "count": int(points.count()),
-                    "bound_box": self._bound_box_summary(getattr(points, "BoundBox", None)),
+                    "bound_box": self._bound_box_summary(
+                        getattr(points, "BoundBox", None)
+                    ),
                 }
             except Exception:
                 try:
@@ -2652,7 +2542,9 @@ class VibeCADService:
             for axis in range(1, 7):
                 property_name = f"Axis{axis}"
                 try:
-                    item["axes"][property_name.lower()] = float(getattr(obj, property_name))
+                    item["axes"][property_name.lower()] = float(
+                        getattr(obj, property_name)
+                    )
                 except Exception:
                     continue
             item["tcp"] = self._placement_summary(getattr(obj, "Tcp", None))
@@ -2661,12 +2553,16 @@ class VibeCADService:
             for property_name in ("RobotVrmlFile", "RobotKinematicFile", "Error"):
                 if hasattr(obj, property_name):
                     try:
-                        item[property_name.lower()] = self._short_value(getattr(obj, property_name))
+                        item[property_name.lower()] = self._short_value(
+                            getattr(obj, property_name)
+                        )
                     except Exception:
                         continue
         if getattr(obj, "TypeId", "") == "Robot::TrajectoryObject":
             trajectory = getattr(obj, "Trajectory", None)
-            waypoints = list(getattr(trajectory, "Waypoints", []) or []) if trajectory else []
+            waypoints = (
+                list(getattr(trajectory, "Waypoints", []) or []) if trajectory else []
+            )
             item["waypoint_count"] = len(waypoints)
             try:
                 item["duration"] = float(getattr(trajectory, "Duration", 0.0))
@@ -2752,7 +2648,8 @@ class VibeCADService:
         if doc is None:
             return []
         return [
-            obj for obj in doc.Objects
+            obj
+            for obj in doc.Objects
             if getattr(obj, "TypeId", "").startswith("Part::")
         ]
 
@@ -2774,10 +2671,19 @@ class VibeCADService:
 
     def _part_object_summary(self, obj: Any) -> dict[str, Any]:
         item = self._object_summary(obj)
-        for property_name in ("Length", "Width", "Height", "Radius", "Angle", "Placement"):
+        for property_name in (
+            "Length",
+            "Width",
+            "Height",
+            "Radius",
+            "Angle",
+            "Placement",
+        ):
             if hasattr(obj, property_name):
                 try:
-                    item[property_name.lower()] = self._short_value(getattr(obj, property_name))
+                    item[property_name.lower()] = self._short_value(
+                        getattr(obj, property_name)
+                    )
                 except Exception:
                     continue
         shape = getattr(obj, "Shape", None)
@@ -2870,7 +2776,9 @@ class VibeCADService:
     def _points_object_summary(self, obj: Any) -> dict[str, Any]:
         item = self._object_summary(obj)
         points = getattr(obj, "Points", None)
-        point_list = list(getattr(points, "Points", []) or []) if points is not None else []
+        point_list = (
+            list(getattr(points, "Points", []) or []) if points is not None else []
+        )
         item["point_count"] = len(point_list)
         item["bound_box"] = self._bound_box_summary(getattr(points, "BoundBox", None))
         item["sample"] = [
@@ -2927,10 +2835,16 @@ class VibeCADService:
                 except Exception:
                     properties = getattr(material, "AppearanceProperties", {}) or {}
                     if property_name in properties:
-                        item[property_name.lower()] = self._short_value(properties[property_name])
+                        item[property_name.lower()] = self._short_value(
+                            properties[property_name]
+                        )
         try:
             view_object = getattr(obj, "ViewObject", None)
-            appearances = list(getattr(view_object, "ShapeAppearance", []) or []) if view_object else []
+            appearances = (
+                list(getattr(view_object, "ShapeAppearance", []) or [])
+                if view_object
+                else []
+            )
             item["shape_appearance_count"] = len(appearances)
             if appearances:
                 appearance = appearances[0]
@@ -2945,7 +2859,10 @@ class VibeCADService:
         return item
 
     def material_summary(self) -> dict[str, Any]:
-        objects = [self._material_object_summary(obj) for obj in self._material_capable_objects()]
+        objects = [
+            self._material_object_summary(obj)
+            for obj in self._material_capable_objects()
+        ]
         doc = self._active_document()
         return {
             "document": doc.Name if doc else None,
@@ -2980,7 +2897,9 @@ class VibeCADService:
         return coerced
 
     def run_workbench_command(self, command_name: str) -> dict[str, Any]:
-        return self._registry.call("core.run_workbench_command", command_name=command_name)
+        return self._registry.call(
+            "core.run_workbench_command", command_name=command_name
+        )
 
     def _select_default_sketch_plane(self) -> dict[str, Any]:
         try:
@@ -2997,7 +2916,11 @@ class VibeCADService:
                 return {"selected": False, "reason": "Existing selection preserved."}
         except Exception:
             pass
-        bodies = [obj for obj in doc.Objects if getattr(obj, "TypeId", "") == "PartDesign::Body"]
+        bodies = [
+            obj
+            for obj in doc.Objects
+            if getattr(obj, "TypeId", "") == "PartDesign::Body"
+        ]
         if not bodies:
             return {"selected": False, "error": "No PartDesign body."}
         body = bodies[0]
@@ -3005,7 +2928,8 @@ class VibeCADService:
         features = list(getattr(origin, "OriginFeatures", []) or [])
         plane = next(
             (
-                item for item in features
+                item
+                for item in features
                 if getattr(item, "Name", "") == "XY_Plane"
                 or getattr(item, "Label", "") in {"XY-plane", "XY_Plane", "XY plane"}
             ),
@@ -3016,7 +2940,11 @@ class VibeCADService:
         try:
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(doc.Name, plane.Name)
-            return {"selected": True, "object": plane.Name, "label": getattr(plane, "Label", plane.Name)}
+            return {
+                "selected": True,
+                "object": plane.Name,
+                "label": getattr(plane, "Label", plane.Name),
+            }
         except Exception as exc:
             return {"selected": False, "error": str(exc)}
 
@@ -3032,17 +2960,16 @@ class VibeCADService:
                 "model": self.provider_model(),
                 "reasoning_effort": self.provider_reasoning_effort(),
                 "use_online_by_default": self.use_online_provider_by_default(),
-                "allow_primitive_provider_tools": self.allow_primitive_provider_tools(),
             },
             "workbench": self.active_workbench_name(),
-            "vibecad_project": self.phase_context(),
-            "phase_validation": self.validate_phase_document(),
+            "vibecad_project": self.project_context(),
             "human_steering": self.steering_state(),
             "document": self.document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
             "task_panel": self.task_panel_summary(),
             "view_screenshot": self.view_screenshot_summary(),
+            "reference_images": self.reference_images_summary(),
             "workbenches": self.workbench_summary(),
             "workbench_tool_pack": self.workbench_tool_pack_summary(),
             "workbench_commands": self.workbench_command_summary(),
@@ -3096,17 +3023,16 @@ class VibeCADService:
                 "model": self.provider_model(),
                 "reasoning_effort": self.provider_reasoning_effort(),
                 "use_online_by_default": self.use_online_provider_by_default(),
-                "allow_primitive_provider_tools": self.allow_primitive_provider_tools(),
             },
             "workbench": active_workbench,
-            "vibecad_project": self.phase_context(),
-            "phase_validation": self.validate_phase_document(),
+            "vibecad_project": self.project_context(),
             "human_steering": self.steering_state(),
             "document": self.document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
             "task_panel": self.task_panel_summary(),
             "view_screenshot": self.view_screenshot_summary(),
+            "reference_images": self.reference_images_summary(),
             "workbench_tool_pack": self.workbench_tool_pack_summary(),
             "workbench_commands": self.workbench_command_summary(),
             "workbench_object_templates": self.workbench_object_templates(),
@@ -3153,7 +3079,11 @@ class VibeCADService:
         if workbench == "MeshWorkbench":
             return {"mesh": self.mesh_summary()}
         if workbench == "MeshPartWorkbench":
-            return {"meshpart": self.meshpart_summary(), "mesh": self.mesh_summary(), "part": self.part_summary()}
+            return {
+                "meshpart": self.meshpart_summary(),
+                "mesh": self.mesh_summary(),
+                "part": self.part_summary(),
+            }
         if workbench == "PointsWorkbench":
             return {"points": self.points_summary()}
         if workbench == "SpreadsheetWorkbench":

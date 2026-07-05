@@ -22,23 +22,26 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "center_x": {"type": "number"},
-            "center_y": {"type": "number"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "center_x": {"type": "number", "description": "Slot center X in mm."},
+            "center_y": {"type": "number", "description": "Slot center Y in mm."},
             "length": {
                 "type": "number",
                 "description": (
-                    "Backward-compatible alias for overall end-to-end slot length, "
+                    "Backward-compatible alias in mm for overall end-to-end slot length, "
                     "not center-to-center arc distance."
                 ),
             },
             "overall_length": {
                 "type": "number",
-                "description": "Overall end-to-end slot length including both semicircular ends.",
+                "description": "Overall end-to-end slot length in mm including both semicircular ends.",
             },
             "center_distance": {
                 "type": "number",
-                "description": "Distance between the two semicircular arc centers.",
+                "description": "Distance in mm between the two semicircular arc centers.",
             },
             "length_mode": {
                 "type": "string",
@@ -48,9 +51,9 @@ TOOL_SPEC = {
                     "are omitted. Defaults to overall."
                 ),
             },
-            "width": {"type": "number"},
-            "angle_degrees": {"type": "number"},
-            "construction": {"type": "boolean"},
+            "width": {"type": "number", "description": "Slot width (arc diameter) in mm."},
+            "angle_degrees": {"type": "number", "description": "Slot axis rotation in degrees. Default 0."},
+            "construction": {"type": "boolean", "description": "Create as construction geometry. Default false."},
         },
         "required": ["center_x", "center_y", "width"],
     },
@@ -139,35 +142,37 @@ def run(
         if profile_status.get("ready_for_pocket"):
             suggested_next_actions = [
                 {
-                    "tool": "partdesign.pocket_sketch",
-                    "arguments": {"sketch_name": target.Name},
+                    "tool": "partdesign.extrude",
+                    "arguments": {"operation": "pocket", "sketch_name": target.Name},
                     "why": "Use this fully constrained closed slot profile for a subtractive feature when it is mapped to a solid face.",
                 },
             ]
         else:
             suggested_next_actions = [
                 {
-                    "tool": "sketcher.validate_profile_deep",
-                    "arguments": {"sketch_name": target.Name},
+                    "tool": "sketcher.inspect_sketch",
+                    "arguments": {"sketch_name": target.Name, "include": ["profile_deep"]},
                     "why": "Inspect why this slot profile is not yet feature-ready before creating a PartDesign feature.",
                 },
                 {
-                    "tool": "sketcher.constrain_lock_point",
+                    "tool": "sketcher.add_constraint",
                     "arguments": {
                         "sketch_name": target.Name,
-                        "geometry": base_index + 1,
-                        "point": "center",
+                        "constraint_type": "Lock",
+                        "first_geometry": base_index + 1,
+                        "first_point": "center",
                         "x": float(right_center.x),
                         "y": float(right_center.y),
                     },
                     "why": "Lock one slot arc center to place the slot without using opaque block constraints.",
                 },
                 {
-                    "tool": "sketcher.constrain_angle_between",
+                    "tool": "sketcher.add_constraint",
                     "arguments": {
                         "sketch_name": target.Name,
+                        "constraint_type": "Angle",
                         "first_geometry": base_index,
-                        "angle_degrees": float(angle_degrees),
+                        "value": float(angle_degrees),
                     },
                     "why": "Constrain the slot axis angle when orientation must be explicit.",
                 },

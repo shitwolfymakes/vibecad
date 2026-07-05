@@ -2,6 +2,7 @@
 
 """Authentication state helpers for VibeCAD.
 
+Supports multiple LLM providers (OpenAI, Anthropic) via a provider registry.
 This module does not validate credentials or make network calls at import time.
 """
 
@@ -9,14 +10,64 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 import os
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error, parse, request
 
 
 KEYRING_SERVICE = "FreeCAD VibeCAD"
 KEYRING_USERNAME = "openai-api-key"
+
+DEFAULT_PROVIDER = "openai"
+ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    """Static description of how to authenticate against one LLM provider."""
+
+    provider_id: str
+    display_name: str
+    env_var: str
+    keyring_username: str
+    models_url: str
+
+    def auth_headers(self, api_key: str) -> dict[str, str]:
+        if self.provider_id == "anthropic":
+            return {
+                "x-api-key": api_key,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+            }
+        return {"Authorization": f"Bearer {api_key}"}
+
+
+PROVIDERS: dict[str, ProviderSpec] = {
+    "openai": ProviderSpec(
+        provider_id="openai",
+        display_name="OpenAI",
+        env_var="OPENAI_API_KEY",
+        keyring_username=KEYRING_USERNAME,
+        models_url="https://api.openai.com/v1/models",
+    ),
+    "anthropic": ProviderSpec(
+        provider_id="anthropic",
+        display_name="Anthropic",
+        env_var="ANTHROPIC_API_KEY",
+        keyring_username="anthropic-api-key",
+        models_url="https://api.anthropic.com/v1/models",
+    ),
+}
+
+
+def provider_spec(provider: str) -> ProviderSpec:
+    spec = PROVIDERS.get((provider or "").strip().lower())
+    if spec is None:
+        raise ValueError(
+            f"Unknown provider {provider!r}; expected one of {sorted(PROVIDERS)}."
+        )
+    return spec
 
 
 class AuthStatus(str, Enum):
@@ -53,7 +104,8 @@ def redact_secret(value: str | None) -> str | None:
     return f"{value[:3]}...{value[-4:]}"
 
 
-def read_dotenv_key(path: Path) -> str | None:
+def read_dotenv_key(path: Path, provider: str = DEFAULT_PROVIDER) -> str | None:
+    spec = provider_spec(provider)
     if not path.exists():
         return None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -61,7 +113,7 @@ def read_dotenv_key(path: Path) -> str | None:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        if key.strip() != "OPENAI_API_KEY":
+        if key.strip() != spec.env_var:
             continue
         value = value.strip().strip('"').strip("'")
         return value or None
@@ -81,20 +133,28 @@ def keyring_available() -> bool:
     return _keyring_module() is not None
 
 
-def read_keyring_key() -> str | None:
+def read_keyring_key(provider: str = DEFAULT_PROVIDER) -> str | None:
+    spec = provider_spec(provider)
     keyring = _keyring_module()
     if keyring is None:
         return None
     try:
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME) or None
+        return keyring.get_password(KEYRING_SERVICE, spec.keyring_username) or None
     except Exception:
         return None
 
 
-def store_keyring_key(value: str) -> dict[str, str | bool | None]:
+def store_keyring_key(
+    value: str, provider: str = DEFAULT_PROVIDER
+) -> dict[str, str | bool | None]:
+    spec = provider_spec(provider)
     clean = value.strip()
     if not clean:
-        return {"stored": False, "error": "API key cannot be empty.", "redacted_key": None}
+        return {
+            "stored": False,
+            "error": "API key cannot be empty.",
+            "redacted_key": None,
+        }
     keyring = _keyring_module()
     if keyring is None:
         return {
@@ -103,18 +163,19 @@ def store_keyring_key(value: str) -> dict[str, str | bool | None]:
             "redacted_key": None,
         }
     try:
-        keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, clean)
+        keyring.set_password(KEYRING_SERVICE, spec.keyring_username, clean)
         return {"stored": True, "error": None, "redacted_key": redact_secret(clean)}
     except Exception as exc:
         return {"stored": False, "error": str(exc), "redacted_key": None}
 
 
-def delete_keyring_key() -> dict[str, str | bool]:
+def delete_keyring_key(provider: str = DEFAULT_PROVIDER) -> dict[str, str | bool]:
+    spec = provider_spec(provider)
     keyring = _keyring_module()
     if keyring is None:
         return {"deleted": False, "error": "No OS keyring backend is available."}
     try:
-        keyring.delete_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        keyring.delete_password(KEYRING_SERVICE, spec.keyring_username)
         return {"deleted": True, "error": ""}
     except Exception as exc:
         return {"deleted": False, "error": str(exc)}
@@ -123,58 +184,69 @@ def delete_keyring_key() -> dict[str, str | bool]:
 def resolve_auth_credential(
     env: dict[str, str] | None = None,
     dotenv_path: Path | None = None,
+    provider: str = DEFAULT_PROVIDER,
 ) -> AuthCredential | None:
+    spec = provider_spec(provider)
     data = env if env is not None else os.environ
-    value = data.get("OPENAI_API_KEY")
+    value = data.get(spec.env_var)
     if value:
         return AuthCredential(value=value, source="environment")
 
-    value = read_keyring_key()
+    value = read_keyring_key(provider=provider)
     if value:
         return AuthCredential(value=value, source="OS keyring")
 
     if dotenv_path is not None:
-        value = read_dotenv_key(dotenv_path)
+        value = read_dotenv_key(dotenv_path, provider=provider)
         if value:
             return AuthCredential(value=value, source=str(dotenv_path))
 
     return None
 
 
-def resolve_auth_state(env: dict[str, str] | None = None, dotenv_path: Path | None = None) -> AuthState:
-    credential = resolve_auth_credential(env=env, dotenv_path=dotenv_path)
+def resolve_auth_state(
+    env: dict[str, str] | None = None,
+    dotenv_path: Path | None = None,
+    provider: str = DEFAULT_PROVIDER,
+) -> AuthState:
+    spec = provider_spec(provider)
+    credential = resolve_auth_credential(
+        env=env, dotenv_path=dotenv_path, provider=provider
+    )
     if credential is not None:
         return AuthState(
             AuthStatus.CONFIGURED_UNVERIFIED,
             source=credential.source,
             redacted_key=redact_secret(credential.value),
-            message=f"OpenAI API key found in {credential.source}.",
+            message=f"{spec.display_name} API key found in {credential.source}.",
         )
 
     return AuthState(
         AuthStatus.NOT_CONFIGURED,
-        message="No OpenAI API key is configured.",
+        message=f"No {spec.display_name} API key is configured.",
     )
 
 
-def validate_openai_api_key(
+def validate_api_key(
     api_key: str | None,
     *,
+    provider: str = DEFAULT_PROVIDER,
     source: str | None = None,
     timeout_seconds: float = 10.0,
     opener: Any | None = None,
 ) -> AuthState:
+    spec = provider_spec(provider)
     clean = (api_key or "").strip()
     if not clean:
         return AuthState(
             AuthStatus.NOT_CONFIGURED,
             source=source,
-            message="No OpenAI API key is configured.",
+            message=f"No {spec.display_name} API key is configured.",
         )
 
     http_request = request.Request(
-        "https://api.openai.com/v1/models",
-        headers={"Authorization": f"Bearer {clean}"},
+        spec.models_url,
+        headers=spec.auth_headers(clean),
         method="GET",
     )
     redacted = redact_secret(clean)
@@ -195,13 +267,15 @@ def validate_openai_api_key(
                 AuthStatus.VERIFIED,
                 source=source,
                 redacted_key=redacted,
-                message="OpenAI API key validated.",
+                message=f"{spec.display_name} API key validated.",
             )
         return AuthState(
             AuthStatus.INVALID,
             source=source,
             redacted_key=redacted,
-            message=f"OpenAI credential validation failed with HTTP {status_code}.",
+            message=(
+                f"{spec.display_name} credential validation failed with HTTP {status_code}."
+            ),
         )
     except error.HTTPError as exc:
         status = AuthStatus.INVALID if exc.code in {401, 403} else AuthStatus.OFFLINE
@@ -209,15 +283,61 @@ def validate_openai_api_key(
             status,
             source=source,
             redacted_key=redacted,
-            message=f"OpenAI credential validation failed with HTTP {exc.code}.",
+            message=f"{spec.display_name} credential validation failed with HTTP {exc.code}.",
         )
     except Exception as exc:
         return AuthState(
             AuthStatus.OFFLINE,
             source=source,
             redacted_key=redacted,
-            message=f"OpenAI credential validation could not reach the API: {exc}",
+            message=(
+                f"{spec.display_name} credential validation could not reach the API: {exc}"
+            ),
         )
+
+
+def validate_openai_api_key(
+    api_key: str | None,
+    *,
+    source: str | None = None,
+    timeout_seconds: float = 10.0,
+    opener: Any | None = None,
+) -> AuthState:
+    """Backward-compatible wrapper around validate_api_key for OpenAI."""
+
+    return validate_api_key(
+        api_key,
+        provider="openai",
+        source=source,
+        timeout_seconds=timeout_seconds,
+        opener=opener,
+    )
+
+
+def validate_configured_auth(
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    env: dict[str, str] | None = None,
+    dotenv_path: Path | None = None,
+    timeout_seconds: float = 10.0,
+    opener: Any | None = None,
+) -> AuthState:
+    spec = provider_spec(provider)
+    credential = resolve_auth_credential(
+        env=env, dotenv_path=dotenv_path, provider=provider
+    )
+    if credential is None:
+        return AuthState(
+            AuthStatus.NOT_CONFIGURED,
+            message=f"No {spec.display_name} API key is configured.",
+        )
+    return validate_api_key(
+        credential.value,
+        provider=provider,
+        source=credential.source,
+        timeout_seconds=timeout_seconds,
+        opener=opener,
+    )
 
 
 def validate_configured_openai_auth(
@@ -227,15 +347,96 @@ def validate_configured_openai_auth(
     timeout_seconds: float = 10.0,
     opener: Any | None = None,
 ) -> AuthState:
-    credential = resolve_auth_credential(env=env, dotenv_path=dotenv_path)
-    if credential is None:
-        return AuthState(
-            AuthStatus.NOT_CONFIGURED,
-            message="No OpenAI API key is configured.",
-        )
-    return validate_openai_api_key(
-        credential.value,
-        source=credential.source,
+    """Backward-compatible wrapper around validate_configured_auth for OpenAI."""
+
+    return validate_configured_auth(
+        provider="openai",
+        env=env,
+        dotenv_path=dotenv_path,
         timeout_seconds=timeout_seconds,
         opener=opener,
     )
+
+
+def _parse_model_ids(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    ids: list[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id:
+                ids.append(model_id)
+    return ids
+
+
+def list_provider_models(
+    api_key: str | None,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    timeout_seconds: float = 15.0,
+    opener: Any | None = None,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    """Query the provider's models endpoint.
+
+    Returns {"ok": bool, "models": [str, ...], "error": str | None}.
+    Anthropic paginates via after_id/has_more; OpenAI returns one page.
+    """
+
+    spec = provider_spec(provider)
+    clean = (api_key or "").strip()
+    if not clean:
+        return {
+            "ok": False,
+            "models": [],
+            "error": f"No {spec.display_name} API key is configured.",
+        }
+
+    open_call = opener or request.urlopen
+    models: list[str] = []
+    after_id: str | None = None
+    try:
+        for _ in range(max_pages):
+            url = spec.models_url
+            if spec.provider_id == "anthropic":
+                params = {"limit": "100"}
+                if after_id:
+                    params["after_id"] = after_id
+                url = f"{url}?{parse.urlencode(params)}"
+            http_request = request.Request(
+                url,
+                headers=spec.auth_headers(clean),
+                method="GET",
+            )
+            response = open_call(http_request, timeout=timeout_seconds)
+            try:
+                raw = response.read()
+            finally:
+                if hasattr(response, "close"):
+                    response.close()
+            payload = json.loads(raw.decode("utf-8"))
+            models.extend(_parse_model_ids(payload))
+            if spec.provider_id != "anthropic":
+                break
+            if not payload.get("has_more"):
+                break
+            after_id = payload.get("last_id")
+            if not after_id:
+                break
+        return {"ok": True, "models": models, "error": None}
+    except error.HTTPError as exc:
+        return {
+            "ok": False,
+            "models": models,
+            "error": f"{spec.display_name} models request failed with HTTP {exc.code}.",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "models": models,
+            "error": f"{spec.display_name} models request failed: {exc}",
+        }

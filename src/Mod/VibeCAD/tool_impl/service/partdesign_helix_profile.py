@@ -11,27 +11,37 @@ from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign AdditiveHelix or SubtractiveHelix from an '
-                'existing profile sketch around one of the sketch axes.',
+ 'description': 'Create a native PartDesign AdditiveHelix or SubtractiveHelix by '
+                'sweeping a profile sketch along a helical path around a sketch '
+                'axis. Use for threads, springs, coils, worm gears, and auger '
+                'flights: additive builds the helix as material, subtractive cuts '
+                'a helical groove (e.g. thread relief) from the body.',
  'name': 'partdesign.helix_profile',
- 'parameters': {'properties': {'angle': {'description': 'Helix taper angle in degrees.',
+ 'parameters': {'properties': {'angle': {'description': 'Helix taper angle in degrees (default 0 = constant radius).',
                                          'type': 'number'},
-                               'growth': {'description': 'Helix growth parameter for native modes that use growth.',
+                               'growth': {'description': 'Radial growth in mm per turn; only used when native_mode=3.',
                                           'type': 'number'},
-                               'height': {'type': 'number'},
+                               'height': {'description': 'Total helix height in mm along the axis (default 9).',
+                                          'type': 'number'},
                                'label': {'type': 'string'},
-                               'left_handed': {'type': 'boolean'},
-                               'mode': {'enum': ['additive', 'subtractive'],
+                               'left_handed': {'description': 'Left-handed helix (default false = right-handed).',
+                                               'type': 'boolean'},
+                               'mode': {'description': 'additive adds material; subtractive cuts a helical groove.',
+                                        'enum': ['additive', 'subtractive'],
                                         'type': 'string'},
-                               'native_mode': {'description': 'Native Helix Mode integer: 0 pitch-height-angle, 1 pitch-turns-angle, 2 height-turns-angle, 3 height-turns-growth.',
+                               'native_mode': {'description': 'Native Helix Mode integer: 0 pitch-height-angle (default), 1 pitch-turns-angle, 2 height-turns-angle, 3 height-turns-growth.',
                                                'type': 'integer'},
-                               'pitch': {'type': 'number'},
-                               'profile_sketch_name': {'type': 'string'},
-                               'reference_axis': {'description': 'Sketch axis used as helix axis.',
+                               'pitch': {'description': 'Axial distance in mm per turn (default 3).',
+                                         'type': 'number'},
+                               'profile_sketch_name': {'description': 'Profile sketch (name or label) placed beside the axis; its offset from the axis sets the helix radius.',
+                                                       'type': 'string'},
+                               'reference_axis': {'description': 'Sketch axis used as helix axis (default V_Axis).',
                                                   'enum': ['H_Axis', 'V_Axis', 'N_Axis'],
                                                   'type': 'string'},
-                               'reversed': {'type': 'boolean'},
-                               'turns': {'type': 'number'}},
+                               'reversed': {'description': 'Sweep in the opposite axis direction.',
+                                            'type': 'boolean'},
+                               'turns': {'description': 'Number of turns (default 3); used by native modes 1-3.',
+                                         'type': 'number'}},
                 'required': ['profile_sketch_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
@@ -142,15 +152,19 @@ def run(
     effective = not isinstance(feature_effect, dict) or bool(feature_effect.get("ok"))
     ok = bool(transaction.get("ok")) and effective
     error = None
+    likely_cause = None
     if not transaction.get("ok"):
         error = transaction.get("error") or "PartDesign Helix failed."
     elif not effective:
-        rollback_note = (
-            " It was removed automatically to keep the Body tip coherent."
-            if transaction_result.get("rolled_back_feature")
-            else ""
+        error, likely_cause = domain_runtime.describe_ineffective_partdesign_feature(
+            "helix" if requested_mode == "additive" else "subtractive_helix",
+            feature_shape=transaction_result.get("feature_shape"),
+            feature_effect=feature_effect,
+            feature_state=transaction_result.get("feature_state"),
+            report_errors=domain_runtime.recompute_errors(transaction),
+            rolled_back=bool(transaction_result.get("rolled_back_feature")),
+            lead_in="PartDesign Helix was created but did not produce an effective body shape change.",
         )
-        error = f"PartDesign Helix was created but did not produce an effective body shape change.{rollback_note}"
     return {
         "ok": ok,
         **({"error": error, "recoverable": True} if error else {}),
@@ -158,6 +172,8 @@ def run(
         "partdesign": domain_runtime.partdesign_summary(service),
         "active_feature": transaction_result.get("feature"),
         "feature_shape": transaction_result.get("feature_shape"),
+        "feature_state": transaction_result.get("feature_state"),
+        "likely_cause": likely_cause,
         "body_shape_before": transaction_result.get("body_shape_before"),
         "body_shape_after": transaction_result.get("body_shape_after"),
         "body_shape_delta": transaction_result.get("body_shape_delta"),

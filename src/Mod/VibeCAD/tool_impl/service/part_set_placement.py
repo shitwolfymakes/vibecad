@@ -4,19 +4,29 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
 
 
-TOOL_SPEC = {'description': 'Set object placement and yaw/pitch/roll rotation for positioning '
-                'components coherently.',
+TOOL_SPEC = {'description': "Set an object's global placement: position plus yaw/pitch/roll "
+                'rotation. For components inside a native Assembly use '
+                'assembly.set_component_placement instead.',
  'name': 'part.set_placement',
- 'parameters': {'properties': {'object_name': {'type': 'string'},
-                               'pitch_degrees': {'type': 'number'},
-                               'roll_degrees': {'type': 'number'},
-                               'x': {'type': 'number'},
-                               'y': {'type': 'number'},
-                               'yaw_degrees': {'type': 'number'},
-                               'z': {'type': 'number'}},
+ 'parameters': {'properties': {'object_name': {'description': 'Object name or label to reposition.',
+                                               'type': 'string'},
+                               'pitch_degrees': {'description': 'Rotation about Y axis in degrees.',
+                                                 'type': 'number'},
+                               'roll_degrees': {'description': 'Rotation about X axis in degrees.',
+                                                'type': 'number'},
+                               'x': {'description': 'Global X position in mm.',
+                                     'type': 'number'},
+                               'y': {'description': 'Global Y position in mm.',
+                                     'type': 'number'},
+                               'yaw_degrees': {'description': 'Rotation about Z axis in degrees.',
+                                               'type': 'number'},
+                               'z': {'description': 'Global Z position in mm.',
+                                     'type': 'number'}},
                 'required': ['object_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

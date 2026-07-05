@@ -72,16 +72,16 @@ def run(service: Any, sketch_name: str | None = None) -> dict[str, Any]:
     if profile_status.get("ready_for_pad"):
         next_actions.append(
             {
-                "tool": "partdesign.pad_sketch",
-                "arguments": {"sketch_name": sketch.Name},
+                "tool": "partdesign.extrude",
+                "arguments": {"operation": "pad", "sketch_name": sketch.Name},
                 "why": "The closed sketch is fully constrained and ready for an additive PartDesign feature.",
             }
         )
     if profile_status.get("ready_for_pocket"):
         next_actions.append(
             {
-                "tool": "partdesign.pocket_sketch",
-                "arguments": {"sketch_name": sketch.Name},
+                "tool": "partdesign.extrude",
+                "arguments": {"operation": "pocket", "sketch_name": sketch.Name},
                 "why": "The closed sketch is fully constrained and ready for a subtractive PartDesign feature.",
             }
         )

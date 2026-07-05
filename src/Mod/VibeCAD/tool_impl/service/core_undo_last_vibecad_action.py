@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Undo the most recent applied VibeCAD action through the active '
-                'FreeCAD document undo stack.',
+TOOL_SPEC = {'description': 'Undo the most recent applied VibeCAD action via the document undo '
+                'stack; for removing a specific older object use core.delete_object.',
  'name': 'core.undo_last_vibecad_action',
  'safety': 'WRITE'}
 

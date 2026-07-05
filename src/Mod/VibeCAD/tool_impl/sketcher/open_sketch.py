@@ -11,7 +11,10 @@ from .common import get_sketch, no_sketch, profile_validation, run_freecad_trans
 
 TOOL_SPEC = {
     "name": "sketcher.open_sketch",
-    "description": "Open an existing native Sketcher sketch for editing and return current solver/profile state.",
+    "description": (
+        "Open an existing native Sketcher sketch for editing and return current solver/profile "
+        "state. Pair with sketcher.close_sketch before creating PartDesign features."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 TOOL_SPEC = {
     "description": (
-        "Explicitly enter a FreeCAD workspace/workbench for the next CAD operation. "
-        "Use this from the small planning surface before asking VibeCAD to expose "
-        "that workspace's full useful tool pack."
+        "Switch to a FreeCAD workspace/workbench. This is the only "
+        "workspace-switching tool: entering a workspace exposes its full "
+        "CAD tool pack on the next turn. Call it before using any "
+        "workspace-specific tool."
     ),
     "name": "core.enter_workspace",
     "parameters": {
@@ -38,27 +39,6 @@ def run(service, name: str, goal: str = "", reason: str = "") -> dict[str, objec
     from tool_impl.service.core_activate_workbench import run as activate_workbench
     from VibeCADWorkbenchTools import get_tool_pack
 
-    phase_context = service.phase_context()
-    phase = str(phase_context.get("active_phase") or "intent")
-    allowed = set(service.phase_allowed_workbenches(phase))
-    if phase == "intent" or (allowed and name not in allowed):
-        return {
-            "ok": False,
-            "requested": name,
-            "active_phase": phase,
-            "allowed_workbenches": sorted(allowed),
-            "error": (
-                f"{name} is outside the current VibeCAD phase '{phase}'. "
-                "Request or select the appropriate phase before entering this workspace."
-            ),
-            "recoverable": True,
-            "required_next_action": {
-                "tool": "phase.set_current",
-                "arguments": {"phase": _phase_for_workbench(name), "reason": reason or goal},
-                "why": "Workspace access is phase-scoped so each workflow has tuned tools and validators.",
-            },
-        }
-
     result = activate_workbench(service, name=name)
     active = result.get("active")
     if active is None:
@@ -85,13 +65,3 @@ def run(service, name: str, goal: str = "", reason: str = "") -> dict[str, objec
             response["error"] = result["error"]
             response["recoverable"] = True
     return response
-
-
-def _phase_for_workbench(name: str) -> str:
-    if name == "AssemblyWorkbench":
-        return "assembly"
-    if name == "FemWorkbench":
-        return "analysis"
-    if name == "CAMWorkbench":
-        return "manufacturing"
-    return "design"

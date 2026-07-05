@@ -7,8 +7,12 @@ from __future__ import annotations
 TOOL_SPEC = {'description': 'Return non-empty cells from a Spreadsheet sheet within a bounded scan '
                 'range.',
  'name': 'spreadsheet.get_sheet',
- 'parameters': {'properties': {'max_columns': {'type': 'integer'},
-                               'max_rows': {'type': 'integer'},
+ 'parameters': {'properties': {'max_columns': {'description': 'Columns to scan, 1-26 '
+                                                              '(default 8).',
+                                               'type': 'integer'},
+                               'max_rows': {'description': 'Rows to scan, 1-200 '
+                                                           '(default 20).',
+                                            'type': 'integer'},
                                'sheet_name': {'description': 'Spreadsheet object name '
                                                              'or label. Defaults to '
                                                              'the first sheet.',

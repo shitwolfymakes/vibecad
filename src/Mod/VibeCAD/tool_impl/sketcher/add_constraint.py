@@ -7,16 +7,31 @@ from __future__ import annotations
 from typing import Any
 
 from .common import active_response, get_sketch, no_sketch, resolve_geometry_index, run_freecad_transaction
+from .constrain_common import optional_point_position
 
+
+POINT_ROLE_ENUM = ["whole", "start", "end", "center", "midpoint", "origin"]
 
 TOOL_SPEC = {
     "name": "sketcher.add_constraint",
-    "description": "Add one native Sketcher constraint to an existing sketch. Supports core human Sketcher constraints including coincidence, point-on-object, horizontal/vertical, parallel, perpendicular, tangent, equal, symmetric, block, distance, radius, diameter, angle, and lock.",
+    "description": (
+        "Add one native Sketcher constraint to an existing sketch. Supports every core human Sketcher "
+        "constraint: Coincident, PointOnObject, Horizontal, Vertical, Parallel, Perpendicular, Tangent, "
+        "Equal, Symmetric, Block, Distance (on one element or between two points), DistanceX, DistanceY, "
+        "Radius, Diameter, Angle (on one curve or between two), and Lock (pin a point to exact x/y). "
+        "Point attachments accept either raw *_pos integers or semantic *_point roles "
+        "(start/end/center/midpoint/origin). Geometry targets accept indices or handles such as "
+        "geometry:0, name:edge, origin, axis:H, axis:V, external:0. Creates new constraints only — "
+        "use sketcher.edit_constraint to change existing ones and sketcher.delete_items to remove them."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
             "constraint_type": {
                 "type": "string",
                 "enum": [
@@ -42,15 +57,33 @@ TOOL_SPEC = {
             "first_geometry": {"type": "integer"},
             "first_geometry_handle": {"type": "string"},
             "first_pos": {"type": "integer"},
+            "first_point": {
+                "type": "string",
+                "enum": POINT_ROLE_ENUM,
+                "description": "Semantic point role on the first geometry (alternative to first_pos).",
+            },
             "second_geometry": {"type": "integer"},
             "second_geometry_handle": {"type": "string"},
             "second_pos": {"type": "integer"},
+            "second_point": {
+                "type": "string",
+                "enum": POINT_ROLE_ENUM,
+                "description": "Semantic point role on the second geometry (alternative to second_pos).",
+            },
             "third_geometry": {"type": "integer"},
             "third_geometry_handle": {"type": "string"},
             "third_pos": {"type": "integer"},
-            "value": {"type": "number"},
-            "x": {"type": "number"},
-            "y": {"type": "number"},
+            "third_point": {
+                "type": "string",
+                "enum": POINT_ROLE_ENUM,
+                "description": "Semantic point role on the third geometry (alternative to third_pos; used by Symmetric).",
+            },
+            "value": {
+                "type": "number",
+                "description": "Dimension value: mm for Distance/DistanceX/DistanceY/Radius/Diameter, degrees for Angle.",
+            },
+            "x": {"type": "number", "description": "Lock only: exact sketch X coordinate in mm."},
+            "y": {"type": "number", "description": "Lock only: exact sketch Y coordinate in mm."},
         },
         "required": ["constraint_type"],
     },
@@ -115,6 +148,54 @@ def _constraint_indices(raw_value: Any) -> int | list[int]:
     return int(raw_value)
 
 
+def _resolve_point_roles(
+    constraint_type: str,
+    first_pos: int | None,
+    first_point: str | None,
+    first_geometry_handle: str | None,
+    second_pos: int | None,
+    second_point: str | None,
+    second_geometry_handle: str | None,
+    third_pos: int | None,
+    third_point: str | None,
+    third_geometry_handle: str | None,
+    second_geometry: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    """Resolve semantic point roles (start/end/center/...) into raw Sketcher pos ints.
+
+    Explicit *_pos integers always win. When only *_point roles are provided they are
+    translated via the same role table the retired constrain_* wrappers used, including
+    the origin-handle shortcut. Point-anchored constraint types get the same defaults
+    those wrappers applied when neither pos nor point is given.
+    """
+    defaults: dict[str, tuple[str | None, str | None, str | None]] = {
+        "Coincident": ("end", "start", None),
+        "PointOnObject": ("start", None, None),
+        "Symmetric": ("start", "start", "whole"),
+        "Lock": ("start", None, None),
+        "Distance": ("start", "start", None),
+        "DistanceX": ("start", "start", None),
+        "DistanceY": ("start", "start", None),
+        "Angle": ("whole", "whole", None),
+    }
+    first_default, second_default, third_default = defaults.get(constraint_type, (None, None, None))
+    has_second = second_geometry is not None or bool(second_geometry_handle)
+    # Distance and Angle accept a single-element form; only default the first pos when the
+    # constraint is actually point-anchored (a role was named or a second target exists).
+    first_needs_default = first_default is not None and (
+        constraint_type not in {"Distance", "Angle"} or first_point is not None or has_second
+    )
+    if first_pos is None and (first_point is not None or first_needs_default):
+        first_pos = optional_point_position(first_point, first_geometry_handle, first_default or "start")
+    if second_pos is None and (
+        second_point is not None or (second_default is not None and has_second)
+    ):
+        second_pos = optional_point_position(second_point, second_geometry_handle, second_default or "start")
+    if third_pos is None and (third_point is not None or third_default is not None):
+        third_pos = optional_point_position(third_point, third_geometry_handle, third_default or "whole")
+    return first_pos, second_pos, third_pos
+
+
 def run(
     service: Any,
     sketch_name: str | None = None,
@@ -122,12 +203,15 @@ def run(
     first_geometry: int | None = None,
     first_geometry_handle: str | None = None,
     first_pos: int | None = None,
+    first_point: str | None = None,
     second_geometry: int | None = None,
     second_geometry_handle: str | None = None,
     second_pos: int | None = None,
+    second_point: str | None = None,
     third_geometry: int | None = None,
     third_geometry_handle: str | None = None,
     third_pos: int | None = None,
+    third_point: str | None = None,
     value: float | None = None,
     x: float | None = None,
     y: float | None = None,
@@ -142,6 +226,22 @@ def run(
             "error": f"Unsupported Sketcher constraint type: {clean_type}",
             "supported": sorted(SUPPORTED_CONSTRAINTS),
         }
+    try:
+        first_pos, second_pos, third_pos = _resolve_point_roles(
+            clean_type,
+            first_pos,
+            first_point,
+            first_geometry_handle,
+            second_pos,
+            second_point,
+            second_geometry_handle,
+            third_pos,
+            third_point,
+            third_geometry_handle,
+            second_geometry,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "constraint_type": clean_type}
     try:
         first_geometry = resolve_geometry_index(service, sketch, first_geometry, first_geometry_handle)
         if second_geometry is not None or second_geometry_handle:

@@ -4,16 +4,20 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Add one existing document object to a native Assembly by name or '
-                'label, equivalent to adding a component after inspecting the '
-                'assembly.',
+TOOL_SPEC = {'description': 'Add an existing document object (e.g. a PartDesign Body) to a '
+                'native Assembly as a component.',
  'name': 'assembly.add_component',
- 'parameters': {'properties': {'assembly_name': {'type': 'string'},
-                               'component_name': {'type': 'string'}},
+ 'parameters': {'properties': {'assembly_name': {'description': 'Assembly name or label. Defaults to the first assembly in the document.',
+                                                 'type': 'string'},
+                               'component_name': {'description': 'Object name or label to add.',
+                                                  'type': 'string'}},
                 'required': ['component_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

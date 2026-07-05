@@ -4,14 +4,19 @@
 
 from __future__ import annotations
 
-from VibeCADTransactions import run_freecad_transaction
 from pathlib import Path
+from typing import Any
+
+from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'description': 'Open an existing FreeCAD/CAD document from a local file path and make '
                 'it active.',
  'name': 'core.open_document',
- 'parameters': {'properties': {'file_path': {'type': 'string'}},
+ 'parameters': {'properties': {'file_path': {'description': 'Local path to an existing '
+                                                            'document file; ~ is '
+                                                            'expanded.',
+                                             'type': 'string'}},
                 'required': ['file_path'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE'}

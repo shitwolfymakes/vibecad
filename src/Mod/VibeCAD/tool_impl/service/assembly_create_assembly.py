@@ -4,14 +4,18 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native Assembly object and optionally add existing document '
-                'components by name or label.',
+TOOL_SPEC = {'description': 'Create a native Assembly container for positioning multiple '
+                'components together, optionally adding existing objects at creation.',
  'name': 'assembly.create_assembly',
- 'parameters': {'properties': {'component_names': {'items': {'type': 'string'},
+ 'parameters': {'properties': {'component_names': {'description': 'Existing object names or labels to add as components.',
+                                                   'items': {'type': 'string'},
                                                    'type': 'array'},
                                'label': {'type': 'string'}},
                 'type': 'object'},

@@ -133,6 +133,32 @@ def partdesign_feature_effect(
     }
 
 
+def feature_state_summary(feature: Any) -> dict[str, Any]:
+    """Snapshot a feature's recompute health before it may be rolled back.
+
+    Captures FreeCAD's ``State`` flags (``Invalid``/``Touched``/...), whether
+    the feature's own shape passes ``isValid()``, and the feature name so the
+    diagnostics survive the feature being deleted during rollback.
+    """
+    try:
+        state = [str(item) for item in (getattr(feature, "State", []) or [])]
+    except Exception:
+        state = []
+    shape_valid: bool | None = None
+    try:
+        shape = getattr(feature, "Shape", None)
+        if shape is not None and not shape.isNull():
+            shape_valid = bool(shape.isValid())
+    except Exception:
+        shape_valid = None
+    return {
+        "name": getattr(feature, "Name", None),
+        "state": state,
+        "marked_invalid": any("Invalid" in item for item in state),
+        "shape_valid": shape_valid,
+    }
+
+
 def finalize_partdesign_feature_effect(
     doc: Any,
     body: Any,
@@ -142,6 +168,7 @@ def finalize_partdesign_feature_effect(
 ) -> dict[str, Any]:
     body_shape_after = shape_summary(body)
     feature_shape = shape_summary(feature)
+    feature_state = feature_state_summary(feature)
     feature_effect = partdesign_feature_effect(
         operation,
         body_shape_before,
@@ -162,10 +189,241 @@ def finalize_partdesign_feature_effect(
         "body_shape_after": body_shape_after,
         "body_shape_delta": feature_effect["body_shape_delta"],
         "feature_shape": feature_shape,
+        "feature_state": feature_state,
         "feature_effect": feature_effect,
         "rolled_back_feature": rolled_back_feature,
         "body_shape_after_rollback": body_shape_after_rollback,
     }
+
+
+def recompute_errors(transaction: dict[str, Any]) -> list[str]:
+    """Extract recompute/report-view error lines from a transaction result."""
+    errors: list[str] = []
+    if not isinstance(transaction, dict):
+        return errors
+    report = transaction.get("report_view_errors")
+    if isinstance(report, dict):
+        errors.extend(str(line) for line in report.get("errors", []) or [])
+    transaction_error = transaction.get("error")
+    if transaction_error and str(transaction_error) not in errors:
+        errors.append(str(transaction_error))
+    return errors
+
+
+def likely_ineffective_feature_cause(
+    operation: str,
+    feature_effect: dict[str, Any] | None,
+    feature_state: dict[str, Any] | None,
+    report_errors: list[str] | None,
+) -> str | None:
+    """Best-effort explanation for why a PartDesign feature had no body effect."""
+    joined = " ".join(report_errors or []).lower()
+    if "multiple solids" in joined:
+        return (
+            "The recompute produced multiple solids, which a PartDesign Body "
+            "does not allow. Ensure the feature (and every pattern occurrence) "
+            "overlaps existing body material so everything fuses into one "
+            "connected solid."
+        )
+    if "disjoint" in joined or "does not intersect" in joined:
+        return (
+            "The feature shape does not touch the existing body material, so "
+            "fusing/cutting it had no effect. Move or resize the profile so it "
+            "intersects the body."
+        )
+    state = feature_state if isinstance(feature_state, dict) else {}
+    if state.get("marked_invalid"):
+        return (
+            "FreeCAD marked the feature Invalid during recompute; its "
+            "parameters could not be solved against the current body. Check "
+            "the report-view errors above for the solver message."
+        )
+    effect = feature_effect if isinstance(feature_effect, dict) else {}
+    if effect.get("feature_has_shape"):
+        if operation in {"pocket", "hole", "groove"}:
+            return (
+                "The cutting tool shape computed but removed no material - it "
+                "likely lies outside the body or spans a region with no "
+                "existing material. Verify the profile position, cut direction, "
+                "and depth against the body's bounding box."
+            )
+        return (
+            "The feature shape computed but the body's overall shape did not "
+            "change - the new material likely coincides exactly with existing "
+            "material or fails to fuse into the body."
+        )
+    return (
+        "The feature produced no usable shape of its own; the profile or "
+        "parameters likely could not generate geometry. Inspect the source "
+        "sketch/profile and the feature parameters."
+    )
+
+
+def describe_ineffective_partdesign_feature(
+    operation: str,
+    *,
+    feature_shape: dict[str, Any] | None,
+    feature_effect: dict[str, Any] | None,
+    feature_state: dict[str, Any] | None,
+    report_errors: list[str] | None,
+    rolled_back: bool,
+    lead_in: str | None = None,
+) -> tuple[str, str | None]:
+    """Compose a diagnostic error message for a rolled-back PartDesign feature.
+
+    Returns ``(error_message, likely_cause)``. The message keeps the stable
+    lead-in ("was created but did not produce an effective body shape change",
+    or the caller-supplied ``lead_in`` override for tools with their own
+    stable phrasing) and appends: feature shape stats, Invalid-state flag,
+    body delta, captured report-view error lines, the likely-cause hint, and
+    the rollback note.
+    """
+    parts: list[str] = [
+        lead_in
+        or (
+            f"PartDesign {operation} was created but did not produce an "
+            "effective body shape change."
+        )
+    ]
+    shape = feature_shape if isinstance(feature_shape, dict) else {}
+    if shape.get("available"):
+        parts.append(
+            "The feature itself computed a shape "
+            f"({int(shape.get('solids', 0) or 0)} solid(s), "
+            f"{int(shape.get('faces', 0) or 0)} face(s), "
+            f"volume {float(shape.get('volume', 0.0) or 0.0):.3f} mm^3)."
+        )
+    else:
+        parts.append("The feature did not compute a usable shape of its own.")
+    state = feature_state if isinstance(feature_state, dict) else {}
+    if state.get("marked_invalid"):
+        parts.append("FreeCAD marked the feature Invalid after recompute.")
+    effect = feature_effect if isinstance(feature_effect, dict) else {}
+    delta = effect.get("body_shape_delta")
+    if isinstance(delta, dict):
+        parts.append(
+            "Body shape delta: "
+            f"volume {float(delta.get('volume_delta', 0.0) or 0.0):+.3f} mm^3, "
+            f"solids {int(delta.get('solids_delta', 0) or 0):+d}, "
+            f"faces {int(delta.get('faces_delta', 0) or 0):+d}."
+        )
+    lines = [str(line) for line in (report_errors or []) if str(line).strip()]
+    if lines:
+        parts.append("FreeCAD reported: " + " | ".join(lines))
+    likely_cause = likely_ineffective_feature_cause(
+        operation, feature_effect, feature_state, lines
+    )
+    if likely_cause:
+        parts.append(f"Likely cause: {likely_cause}")
+    if rolled_back:
+        parts.append(
+            "It was removed automatically to keep the Body tip coherent."
+        )
+    return " ".join(parts), likely_cause
+
+
+def build_mutation_result(
+    transaction: dict[str, Any],
+    *,
+    extra: dict[str, Any] | None = None,
+    next_action: str | None = None,
+) -> dict[str, Any]:
+    """Standard rich result envelope for mutating service tools.
+
+    Wraps a ``run_freecad_transaction`` result with the uniform keys every
+    mutation should expose: ``ok``, ``error`` (when failed), ``transaction``
+    (including document before/after/delta snapshots), and flattened
+    ``recompute_errors``. Tool-specific payload goes in ``extra``.
+    """
+    if not isinstance(transaction, dict):
+        transaction = {"ok": False, "error": "Invalid transaction result."}
+    envelope: dict[str, Any] = {
+        "ok": bool(transaction.get("ok")),
+        "transaction": transaction,
+        "recompute_errors": recompute_errors(transaction),
+        "document_delta": transaction.get("document_delta"),
+    }
+    if transaction.get("error"):
+        envelope["error"] = str(transaction["error"])
+    if extra:
+        for key, value in extra.items():
+            envelope.setdefault(key, value)
+    if next_action is not None:
+        envelope["next_action"] = next_action
+    return envelope
+
+
+def build_partdesign_feature_result(
+    service: Any,
+    transaction: dict[str, Any],
+    *,
+    operation: str,
+    active_sketch: str | None = None,
+    profile_status: dict[str, Any] | None = None,
+    next_action: str = (
+        "Inspect the created feature, then create the next component/detail "
+        "or capture a screenshot."
+    ),
+) -> dict[str, Any]:
+    """Rich result envelope for PartDesign feature mutations.
+
+    Extends :func:`build_mutation_result` with the feature-effect contract:
+    body shape before/after/delta, feature shape summary, effectiveness
+    verdict, and automatic-rollback reporting.
+    """
+    if not isinstance(transaction, dict):
+        transaction = {"ok": False, "error": "Invalid transaction result."}
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction.get("result"), dict)
+        else {}
+    )
+    feature_effect = result.get("feature_effect")
+    effective = not isinstance(feature_effect, dict) or bool(feature_effect.get("ok"))
+    ok = bool(transaction.get("ok")) and effective
+    error: str | None = None
+    likely_cause: str | None = None
+    feature_state = (
+        result.get("feature_state")
+        if isinstance(result.get("feature_state"), dict)
+        else None
+    )
+    if transaction.get("ok") and not effective:
+        error, likely_cause = describe_ineffective_partdesign_feature(
+            operation,
+            feature_shape=result.get("feature_shape"),
+            feature_effect=feature_effect,
+            feature_state=feature_state,
+            report_errors=recompute_errors(transaction),
+            rolled_back=bool(result.get("rolled_back_feature")),
+        )
+    envelope: dict[str, Any] = {
+        "ok": ok,
+        "transaction": transaction,
+        "recompute_errors": recompute_errors(transaction),
+        "partdesign": partdesign_summary(service),
+        "active_feature": result.get("feature"),
+        "feature_shape": result.get("feature_shape"),
+        "feature_state": feature_state,
+        "likely_cause": likely_cause,
+        "body_shape_before": result.get("body_shape_before"),
+        "body_shape_after": result.get("body_shape_after"),
+        "body_shape_delta": result.get("body_shape_delta"),
+        "feature_effect": feature_effect,
+        "rolled_back_feature": result.get("rolled_back_feature"),
+        "body_shape_after_rollback": result.get("body_shape_after_rollback"),
+        "next_action": next_action,
+    }
+    if error:
+        envelope["error"] = error
+        envelope["recoverable"] = True
+    elif transaction.get("error"):
+        envelope["error"] = str(transaction["error"])
+    if active_sketch is not None:
+        envelope["active_sketch"] = active_sketch
+    if profile_status is not None:
+        envelope["profile_status"] = profile_status
+    return envelope
 
 
 def spreadsheet_summary(service: Any, sheet_name: str | None = None, max_columns: int = 8, max_rows: int = 20) -> dict[str, Any]:

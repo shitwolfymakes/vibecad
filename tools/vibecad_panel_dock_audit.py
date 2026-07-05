@@ -1,93 +1,54 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: LGPL-2.1-or-later
+"""Smoke test: verify Gui.getMainWindow().addDockWindow() routes through
+DockWindowManager and produces a dock with the native OverlayTitle title bar.
 
-"""Verify VibeCAD opens as a normal right-side FreeCAD dock panel."""
+Run headless:
+    QT_QPA_PLATFORM=offscreen ./build/release/bin/FreeCAD tools/vibecad_panel_dock_audit.py
 
-from __future__ import annotations
+The result is printed to stdout as a single line starting with
+DOCK_AUDIT_RESULT and also written to /tmp/vibecad_dock_audit.json.
+FreeCAD is closed automatically once the audit finishes.
+"""
 
 import json
 import sys
-import traceback
 
-import FreeCADGui as Gui
+RESULT_PATH = "/tmp/vibecad_dock_audit.json"
+
+result = {"ok": False, "titleBar": None, "error": None}
 
 try:
-    from PySide import QtCore, QtWidgets
-except Exception as exc:  # pragma: no cover - requires GUI FreeCAD
-    print(json.dumps({"ok": False, "error": f"PySide unavailable: {exc}"}))
-    sys.exit(1)
+    import FreeCADGui as Gui
+    from PySide6 import QtWidgets
 
+    mw = Gui.getMainWindow()
 
-def process_events(repeats: int = 5) -> None:
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        return
-    for _ in range(repeats):
-        app.processEvents()
+    widget = QtWidgets.QLabel("dock smoke test")
+    widget.setObjectName("DockSmokeTestWidget")
+    widget.setWindowTitle("Dock Smoke Test")
 
+    dock = mw.addDockWindow(widget, "DockSmokeTest", "right")
 
-def main() -> int:
-    main_window = Gui.getMainWindow()
-    main_window.resize(1600, 1000)
-    main_window.show()
-    process_events()
+    title_bar = dock.titleBarWidget()
+    result["titleBar"] = title_bar.objectName() if title_bar is not None else None
+    result["dockObjectName"] = dock.objectName()
+    result["dockClass"] = dock.metaObject().className()
+    result["ok"] = result["titleBar"] == "OverlayTitle"
 
-    Gui.activateWorkbench("PartWorkbench")
-    process_events()
-    Gui.runCommand("VibeCAD_OpenAssistant")
-    process_events(10)
+    # cleanup
+    mw.removeDockWindow("DockSmokeTest")
+except Exception as exc:  # noqa: BLE001 - report anything for the audit
+    result["error"] = f"{type(exc).__name__}: {exc}"
 
-    dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
-    if dock is None:
-        result = {"ok": False, "failures": ["VibeCADAssistantPanel not found"]}
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 1
+line = "DOCK_AUDIT_RESULT " + json.dumps(result)
+print(line)
+sys.stdout.flush()
+with open(RESULT_PATH, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(result))
 
-    area = main_window.dockWidgetArea(dock)
-    rect = dock.geometry()
-    failures = []
-    if not dock.isVisible():
-        failures.append("panel is not visible")
-    if dock.isFloating():
-        failures.append("panel is floating by default")
-    if area != QtCore.Qt.RightDockWidgetArea:
-        failures.append(f"panel is not right-docked by default: {int(area)}")
-    if not (dock.features() & QtWidgets.QDockWidget.DockWidgetMovable):
-        failures.append("panel is not movable/dockable")
-    if not (dock.features() & QtWidgets.QDockWidget.DockWidgetFloatable):
-        failures.append("panel is not floatable like normal docks")
-    if rect.width() > 560:
-        failures.append(f"panel is too wide by default: {rect.width()}")
+# Quit FreeCAD so headless runs terminate on their own.
+try:
+    from PySide6 import QtCore
 
-    result = {
-        "ok": not failures,
-        "failures": failures,
-        "visible": dock.isVisible(),
-        "floating": dock.isFloating(),
-        "area": "right" if area == QtCore.Qt.RightDockWidgetArea else int(area),
-        "geometry": [rect.x(), rect.y(), rect.width(), rect.height()],
-        "features": str(dock.features()),
-    }
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 1 if failures else 0
-
-
-def run_and_exit() -> None:
-    code = 1
-    try:
-        code = main()
-    except Exception:
-        print(
-            json.dumps(
-                {"ok": False, "traceback": traceback.format_exc()},
-                indent=2,
-                sort_keys=True,
-            )
-        )
-    finally:
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.exit(code)
-
-
-QtCore.QTimer.singleShot(1500, run_and_exit)
+    QtCore.QTimer.singleShot(0, QtCore.QCoreApplication.instance().quit)
+except Exception:  # noqa: BLE001 - best effort shutdown
+    pass

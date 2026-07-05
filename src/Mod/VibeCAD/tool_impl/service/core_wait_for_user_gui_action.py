@@ -7,14 +7,13 @@ from __future__ import annotations
 import time
 
 
-TOOL_SPEC = {'description': 'Wait while FreeCAD remains interactive for the user to complete a '
-                'needed GUI click/dialog/task-panel action, then return updated '
-                'document, selection, task-panel, and workbench state.',
+TOOL_SPEC = {'description': 'Pause up to timeout_seconds while the user completes a GUI '
+                'click/dialog/task-panel action, then return updated document, '
+                'selection, task-panel, and workbench state.',
  'name': 'core.wait_for_user_gui_action',
  'parameters': {'properties': {'timeout_seconds': {'description': 'Maximum seconds to '
-                                                                  'wait for a '
-                                                                  'user-visible GUI '
-                                                                  'state change.',
+                                                                  'wait (clamped to '
+                                                                  '30).',
                                                    'type': 'number'}},
                 'type': 'object'},
  'safety': 'VIEW'}

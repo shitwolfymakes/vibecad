@@ -4,21 +4,28 @@
 
 from __future__ import annotations
 
-from . import domain_runtime
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
+
+from . import domain_runtime
 
 
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Create a native PartDesign Body for a separate component, equivalent "
-        "to using the PartDesign body command before creating sketches/features."
+        "Create a new PartDesign Body. Each physically separate component "
+        "(e.g. housing vs rotor) needs its own Body; create it before adding "
+        "that component's sketches and features."
     ),
     "name": "partdesign.create_body",
     "parameters": {
         "type": "object",
         "properties": {
-            "label": {"type": "string"},
+            "label": {
+                "type": "string",
+                "description": "Component name for the Body, e.g. 'Housing'.",
+            },
         },
     },
     "safety": "SAFE_WRITE",

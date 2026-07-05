@@ -11,15 +11,28 @@ from .common import active_response, get_sketch, resolve_geometry_index, run_fre
 
 TOOL_SPEC = {
     "name": "sketcher.set_construction",
-    "description": "Set one Sketcher geometry element as construction or normal geometry, equivalent to toggling construction mode for selected geometry.",
+    "description": (
+        "Set one Sketcher geometry element as construction or normal geometry, equivalent to "
+        "toggling construction mode. Construction geometry guides constraints (axes, pitch "
+        "circles) but is excluded from solid-feature profiles."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "geometry_index": {"type": "integer"},
-            "geometry_handle": {"type": "string"},
-            "construction": {"type": "boolean"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "geometry_index": {"type": "integer", "description": "Target geometry index."},
+            "geometry_handle": {
+                "type": "string",
+                "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
+            },
+            "construction": {
+                "type": "boolean",
+                "description": "True for construction geometry, false for normal profile geometry.",
+            },
         },
         "required": ["construction"],
     },

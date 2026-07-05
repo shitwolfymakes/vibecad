@@ -4,23 +4,32 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Edit existing PartDesign feature dimension properties such as Pad '
-                'Length or AdditiveBox Length/Width/Height in place.',
+ 'description': 'Edit dimension properties of an existing PartDesign feature in '
+                'place (e.g. Pad Length, AdditiveBox Length/Width/Height) — the '
+                'parametric way to resize without rebuilding the feature.',
  'name': 'partdesign.set_feature_dimensions',
- 'parameters': {'properties': {'feature_name': {'type': 'string'},
-                               'height': {'type': 'number'},
-                               'length': {'type': 'number'},
-                               'radius': {'type': 'number'},
-                               'width': {'type': 'number'}},
+ 'parameters': {'properties': {'feature_name': {'description': 'PartDesign feature name or label to edit.',
+                                                'type': 'string'},
+                               'height': {'description': 'New Height in mm, if the feature has one.',
+                                          'type': 'number'},
+                               'length': {'description': 'New Length in mm, if the feature has one.',
+                                          'type': 'number'},
+                               'radius': {'description': 'New Radius in mm, if the feature has one.',
+                                          'type': 'number'},
+                               'width': {'description': 'New Width in mm, if the feature has one.',
+                                         'type': 'number'}},
                 'required': ['feature_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'PartDesignWorkbench'}
-from VibeCADTransactions import run_freecad_transaction
 
 
 def run(

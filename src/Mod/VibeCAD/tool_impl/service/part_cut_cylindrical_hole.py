@@ -4,21 +4,34 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native Part boolean cut using a cylindrical tool to add real '
-                'holes or openings.',
+TOOL_SPEC = {'description': 'Cut a cylindrical hole into a Part object with a one-shot boolean. '
+                'For PartDesign Bodies prefer partdesign.hole_from_sketch (parametric, '
+                'supports counterbore/countersink); use this for quick holes in '
+                'non-Body Part shapes.',
  'name': 'part.cut_cylindrical_hole',
- 'parameters': {'properties': {'axis': {'enum': ['X', 'Y', 'Z'], 'type': 'string'},
-                               'depth': {'type': 'number'},
+ 'parameters': {'properties': {'axis': {'description': 'Global axis of the cylinder (default Z).',
+                                        'enum': ['X', 'Y', 'Z'],
+                                        'type': 'string'},
+                               'depth': {'description': 'Hole depth in mm along the axis (default 20).',
+                                         'type': 'number'},
                                'label': {'type': 'string'},
-                               'radius': {'type': 'number'},
-                               'target_name': {'type': 'string'},
-                               'x': {'type': 'number'},
-                               'y': {'type': 'number'},
-                               'z': {'type': 'number'}},
+                               'radius': {'description': 'Hole radius in mm (default 2).',
+                                          'type': 'number'},
+                               'target_name': {'description': 'Object (name or label) to cut the hole into.',
+                                               'type': 'string'},
+                               'x': {'description': 'Cylinder base X in mm (global).',
+                                     'type': 'number'},
+                               'y': {'description': 'Cylinder base Y in mm (global).',
+                                     'type': 'number'},
+                               'z': {'description': 'Cylinder base Z in mm (global).',
+                                     'type': 'number'}},
                 'required': ['target_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

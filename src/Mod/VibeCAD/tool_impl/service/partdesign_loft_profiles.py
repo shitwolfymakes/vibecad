@@ -4,26 +4,39 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign AdditiveLoft or SubtractiveLoft from an '
-                'existing profile sketch and one or more section sketches.',
+ 'description': 'Create a native PartDesign AdditiveLoft or SubtractiveLoft that '
+                'blends smoothly from a profile sketch through ordered section '
+                'sketches on different planes. The go-to tool for any shape that '
+                'transitions between dissimilar cross-sections or needs '
+                'curvature-continuous flow surfaces. Place each section on its own '
+                'datum plane (partdesign.create_datum_plane with offsets) before '
+                'lofting.',
  'name': 'partdesign.loft_profiles',
- 'parameters': {'properties': {'closed': {'type': 'boolean'},
+ 'parameters': {'properties': {'closed': {'description': 'Close the loft back to the first profile, forming a ring (default false).',
+                                          'type': 'boolean'},
                                'label': {'type': 'string'},
-                               'mode': {'enum': ['additive', 'subtractive'],
+                               'mode': {'description': 'additive adds material; subtractive removes it.',
+                                        'enum': ['additive', 'subtractive'],
                                         'type': 'string'},
-                               'profile_sketch_name': {'type': 'string'},
-                               'ruled': {'type': 'boolean'},
-                               'section_sketch_names': {'items': {'type': 'string'},
+                               'profile_sketch_name': {'description': 'Starting cross-section sketch (name or label).',
+                                                       'type': 'string'},
+                               'ruled': {'description': 'Use straight (ruled) transitions between sections instead of smooth blending (default false).',
+                                         'type': 'boolean'},
+                               'section_sketch_names': {'description': 'Remaining cross-section sketches in loft order, each on a different plane.',
+                                                        'items': {'type': 'string'},
                                                         'type': 'array'}},
                 'required': ['profile_sketch_name', 'section_sketch_names'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'PartDesignWorkbench'}
-from VibeCADTransactions import run_freecad_transaction
 
 
 def run(

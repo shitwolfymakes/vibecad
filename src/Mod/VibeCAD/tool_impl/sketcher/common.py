@@ -25,7 +25,31 @@ def no_sketch(sketch_name: str | None = None) -> dict[str, Any]:
     }
 
 
+def recompute_errors(transaction: dict[str, Any]) -> list[str]:
+    """Extract recompute/report-view error lines from a transaction result."""
+    errors: list[str] = []
+    if not isinstance(transaction, dict):
+        return errors
+    report = transaction.get("report_view_errors")
+    if isinstance(report, dict):
+        errors.extend(str(line) for line in report.get("errors", []) or [])
+    transaction_error = transaction.get("error")
+    if transaction_error and str(transaction_error) not in errors:
+        errors.append(str(transaction_error))
+    return errors
+
+
 def active_response(service: Any, sketch: Any, transaction: dict[str, Any]) -> dict[str, Any]:
+    """Standard rich result envelope for mutating sketcher tools.
+
+    Every sketcher mutation returns this shape: transaction outcome (with
+    document before/after/delta), a mutation summary (created/modified/deleted
+    indices), current geometry/constraints, post-op solver status (DoF,
+    conflicts, redundancies), profile validation, flattened recompute errors,
+    and suggested next/repair actions.
+    """
+    if not isinstance(transaction, dict):
+        transaction = {"ok": False, "error": "Invalid transaction result."}
     updated = service._get_sketch(getattr(sketch, "Name", None))
     sketcher = service.sketcher_summary(getattr(sketch, "Name", None))
     solver = solver_status(service, updated)
@@ -38,9 +62,10 @@ def active_response(service: Any, sketch: Any, transaction: dict[str, Any]) -> d
         else []
     )
     next_actions = repair_actions + suggested_actions + list(service._sketch_next_actions(updated))
-    return {
+    envelope = {
         "ok": bool(transaction.get("ok")),
         "transaction": transaction,
+        "recompute_errors": recompute_errors(transaction),
         "mutation": mutation_summary(transaction, sketcher, solver, profile),
         "sketcher": sketcher,
         "active_sketch": getattr(sketch, "Name", None),
@@ -50,6 +75,9 @@ def active_response(service: Any, sketch: Any, transaction: dict[str, Any]) -> d
         "profile_validation": profile,
         "next_actions": next_actions,
     }
+    if transaction.get("error"):
+        envelope["error"] = str(transaction["error"])
+    return envelope
 
 
 def geometry_metadata(sketch: Any) -> dict[str, Any]:
@@ -462,10 +490,10 @@ def solver_repair_actions(
         repair_actions.append(
             {
                 "kind": "remove_conflicting_constraint",
-                "tool": "sketcher.delete_constraint",
+                "tool": "sketcher.delete_items",
                 "arguments": {
                     "sketch_name": sketch_name,
-                    "constraint_index": index,
+                    "constraint_items": [index],
                 },
                 "target_constraint": constraint,
                 "why": f"FreeCAD solver reports constraint {index} is conflicting; remove or replace it before adding more constraints.",
@@ -481,13 +509,13 @@ def solver_repair_actions(
             repair_actions.append(
                 {
                     "kind": "remove_redundant_constraint",
-                    "tool": "sketcher.delete_constraint",
+                    "tool": "sketcher.delete_items",
                     "arguments": {
                         "sketch_name": sketch_name,
-                        "constraint_index": index,
+                        "constraint_items": [index],
                     },
                     "target_constraint": constraint,
-                    "why": f"FreeCAD solver reports constraint {index} is redundant; delete it and re-run sketcher.diagnose_constraints.",
+                    "why": f"FreeCAD solver reports constraint {index} is redundant; delete it and re-run sketcher.inspect_sketch with include=['constraint_diagnostics'].",
                 }
             )
     return repair_actions
@@ -775,7 +803,7 @@ def constraint_diagnostics(service: Any, sketch: Any | None, tolerance: float = 
                 {
                     "kind": "close_endpoint",
                     "target": endpoints[0],
-                    "suggested_tools": ["sketcher.constrain_coincident", "sketcher.move_point", "sketcher.add_line"],
+                    "suggested_tools": ["sketcher.add_constraint", "sketcher.move_point", "sketcher.add_geometry"],
                     "why": "Endpoint is not connected to another non-construction endpoint within tolerance.",
                 }
             )
@@ -785,7 +813,7 @@ def constraint_diagnostics(service: Any, sketch: Any | None, tolerance: float = 
                 {
                     "kind": "constrain_unreferenced_geometry",
                     "target": {"geometry_index": item["geometry_index"], "geometry_handle": item["geometry_handle"]},
-                    "suggested_tools": ["sketcher.constrain_distance", "sketcher.constrain_horizontal", "sketcher.constrain_vertical", "sketcher.constrain_lock_point"],
+                    "suggested_tools": ["sketcher.add_constraint"],
                     "why": "Geometry has no constraints and the sketch is under-constrained.",
                 }
             )

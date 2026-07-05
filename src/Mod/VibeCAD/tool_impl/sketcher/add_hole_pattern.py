@@ -23,33 +23,36 @@ TOOL_SPEC = {
     "description": (
         "Add a fully constrained native Sketcher hole/bolt pattern in one operation. "
         "Use for mounting holes, bolt patterns, vents, and repeated circular cut profiles "
-        "before partdesign.pocket_sketch or partdesign.hole_from_sketch."
+        "before partdesign.extrude (operation='pocket') or partdesign.hole_from_sketch."
     ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
             "pattern": {
                 "type": "string",
                 "enum": ["rectangular", "linear", "circular"],
                 "description": "Pattern layout. Rectangular is the common centered bolt-pattern layout.",
             },
             "hole_diameter": {"type": "number", "description": "Hole diameter in millimeters."},
-            "center_x": {"type": "number", "description": "Pattern center X coordinate in sketch units."},
-            "center_y": {"type": "number", "description": "Pattern center Y coordinate in sketch units."},
+            "center_x": {"type": "number", "description": "Pattern center X in mm."},
+            "center_y": {"type": "number", "description": "Pattern center Y in mm."},
             "count_x": {"type": "integer", "description": "Rectangular/linear column count."},
             "count_y": {"type": "integer", "description": "Rectangular row count."},
-            "spacing_x": {"type": "number", "description": "Rectangular/linear X spacing or total span when count_x=2."},
-            "spacing_y": {"type": "number", "description": "Rectangular Y spacing or total span when count_y=2."},
+            "spacing_x": {"type": "number", "description": "Rectangular/linear X spacing in mm, or total span when count_x=2."},
+            "spacing_y": {"type": "number", "description": "Rectangular Y spacing in mm, or total span when count_y=2."},
             "count": {"type": "integer", "description": "Linear or circular occurrence count."},
-            "linear_angle_degrees": {"type": "number", "description": "Linear pattern direction angle."},
-            "bolt_circle_diameter": {"type": "number", "description": "Circular pattern pitch-circle diameter."},
-            "start_angle_degrees": {"type": "number", "description": "Circular pattern first-hole angle."},
+            "linear_angle_degrees": {"type": "number", "description": "Linear pattern direction angle in degrees."},
+            "bolt_circle_diameter": {"type": "number", "description": "Circular pattern pitch-circle diameter in mm."},
+            "start_angle_degrees": {"type": "number", "description": "Circular pattern first-hole angle in degrees."},
             "name_prefix": {"type": "string", "description": "Semantic geometry name prefix."},
-            "construction": {"type": "boolean"},
-            "lock_centers": {"type": "boolean"},
-            "equal_radii": {"type": "boolean"},
+            "construction": {"type": "boolean", "description": "Create holes as construction geometry. Default false."},
+            "lock_centers": {"type": "boolean", "description": "Constrain hole centers with dimensional constraints. Default true."},
+            "equal_radii": {"type": "boolean", "description": "Add Equal constraints so all holes share one radius. Default true."},
         },
         "required": ["hole_diameter"],
     },
@@ -175,8 +178,8 @@ def run(
             "equal_radii": bool(equal_radii),
             "suggested_next_actions": [
                 {
-                    "tool": "partdesign.pocket_sketch",
-                    "arguments": {"sketch_name": target.Name},
+                    "tool": "partdesign.extrude",
+                    "arguments": {"operation": "pocket", "sketch_name": target.Name},
                     "why": "Cut these closed hole profiles through the active solid.",
                 },
                 {

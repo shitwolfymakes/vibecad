@@ -7,7 +7,7 @@ from VibeCADTransactions import report_view_error_summary
 
 
 TOOL_SPEC = {'description': 'Return recent FreeCAD report-view error, exception, and traceback '
-                'lines when the GUI report view is available.',
+                'lines; check after a failed or suspect operation.',
  'name': 'core.get_report_view_errors',
  'safety': 'READ'}
 

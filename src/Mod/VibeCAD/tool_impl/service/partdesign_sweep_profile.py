@@ -4,23 +4,40 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
 TOOL_SPEC = {'contextual': True,
  'description': 'Create a native PartDesign AdditivePipe or SubtractivePipe by '
-                'sweeping an existing profile sketch along an existing spine sketch.',
+                'sweeping an existing profile sketch along an existing spine sketch. '
+                'Pass section_sketch_names for a variable cross-section sweep '
+                '(Transformation=Multisection): the swept section morphs through each '
+                'listed sketch along the spine — use this for ducts, channels, and '
+                'flow passages whose cross-sectional area changes along the path.',
  'name': 'partdesign.sweep_profile',
  'parameters': {'properties': {'label': {'type': 'string'},
-                               'mode': {'enum': ['additive', 'subtractive'],
+                               'mode': {'description': 'additive adds material; subtractive removes it.',
+                                        'enum': ['additive', 'subtractive'],
                                         'type': 'string'},
-                               'profile_sketch_name': {'type': 'string'},
-                               'spine_sketch_name': {'type': 'string'}},
+                               'profile_sketch_name': {'description': 'Cross-section sketch (name or label) swept along the spine.',
+                                                       'type': 'string'},
+                               'section_sketch_names': {'description': 'Optional ordered '
+                                                                       'intermediate/end section '
+                                                                       'sketches for a variable '
+                                                                       'cross-section (multisection) '
+                                                                       'sweep.',
+                                                        'items': {'type': 'string'},
+                                                        'type': 'array'},
+                               'spine_sketch_name': {'description': 'Path sketch (name or label) the profile follows.',
+                                                     'type': 'string'}},
                 'required': ['profile_sketch_name', 'spine_sketch_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'PartDesignWorkbench'}
-from VibeCADTransactions import run_freecad_transaction
 
 
 def run(
@@ -29,6 +46,7 @@ def run(
     spine_sketch_name: str,
     label: str = "VibeCAD Sweep",
     mode: str = "additive",
+    section_sketch_names: list[str] | None = None,
 ) -> dict[str, Any]:
     profile = service._get_sketch(profile_sketch_name)
     if profile is None:
@@ -39,6 +57,13 @@ def run(
     requested_mode = str(mode or "additive").lower()
     if requested_mode not in {"additive", "subtractive"}:
         return {"ok": False, "error": "mode must be additive or subtractive."}
+    requested_sections = [str(name) for name in (section_sketch_names or []) if str(name).strip()]
+    section_sketches = []
+    for section_name in requested_sections:
+        section = service._get_sketch(section_name)
+        if section is None:
+            return {"ok": False, "error": "Section sketch not found.", "requested": section_name}
+        section_sketches.append(section)
 
     def _sweep() -> dict[str, Any]:
         import FreeCAD as App
@@ -59,10 +84,23 @@ def run(
             body.addObject(target_spine)
         type_name = "PartDesign::AdditivePipe" if requested_mode == "additive" else "PartDesign::SubtractivePipe"
         object_name = "VibeCAD_AdditivePipe" if requested_mode == "additive" else "VibeCAD_SubtractivePipe"
+        target_sections = []
+        for section in section_sketches:
+            target_section = service._get_sketch(section.Name)
+            if target_section is None:
+                raise RuntimeError(f"Section sketch not found: {section.Name}")
+            if target_section not in list(getattr(body, "Group", []) or []):
+                body.addObject(target_section)
+            target_sections.append(target_section)
         sweep = body.newObject(type_name, object_name)
         sweep.Label = label or "VibeCAD Sweep"
         sweep.Profile = target_profile
         sweep.Spine = target_spine
+        if target_sections:
+            sweep.Transformation = "Multisection"
+            # FreeCAD's Pipe uses Profile as the implicit base section; the
+            # Sections list holds only the additional sections along the spine.
+            sweep.Sections = target_sections
         body.Tip = sweep
         doc.recompute()
         return {
@@ -74,6 +112,8 @@ def run(
             "label": getattr(sweep, "Label", sweep.Name),
             "type": getattr(sweep, "TypeId", ""),
             "mode": requested_mode,
+            "transformation": str(getattr(sweep, "Transformation", "")),
+            "sections": [obj.Name for obj in target_sections],
             "face_count": len(getattr(getattr(sweep, "Shape", None), "Faces", []) or []),
             "volume": float(getattr(getattr(sweep, "Shape", None), "Volume", 0.0) or 0.0),
         }

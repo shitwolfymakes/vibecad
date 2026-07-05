@@ -4,19 +4,25 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
+
 from . import domain_runtime
 
 
 TOOL_SPEC = {'description': "Apply diffuse color and transparency to an object's native "
                 'ShapeMaterial appearance.',
  'name': 'material.apply_appearance',
- 'parameters': {'properties': {'diffuse_color': {'items': {'type': 'number'},
+ 'parameters': {'properties': {'diffuse_color': {'description': 'RGB triple, each component 0.0-1.0, e.g. [0.8, 0.1, 0.1].',
+                                                 'items': {'type': 'number'},
                                                  'maxItems': 3,
                                                  'minItems': 3,
                                                  'type': 'array'},
-                               'object_name': {'type': 'string'},
-                               'transparency': {'type': 'number'}},
+                               'object_name': {'description': 'Object name or label to color.',
+                                               'type': 'string'},
+                               'transparency': {'description': 'Transparency 0.0 (opaque, default) to 1.0 (invisible).',
+                                                'type': 'number'}},
                 'required': ['object_name', 'diffuse_color'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

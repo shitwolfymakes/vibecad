@@ -11,7 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "build" / "release" / "Mod" / "VibeCAD"))
 
-from PySide import QtCore, QtWidgets
+import FreeCAD as App  # noqa: E402  (requires sys.path setup above)
+from PySide import QtCore, QtWidgets  # noqa: E402
 
 
 def main() -> int:
@@ -34,4 +35,16 @@ def run_and_exit() -> None:
         app.exit(code)
 
 
-QtCore.QTimer.singleShot(0, run_and_exit)
+if App.GuiUp:
+    # GUI event loop is (about to be) running: defer until it starts.
+    QtCore.QTimer.singleShot(0, run_and_exit)
+else:
+    # FreeCADCmd never spins a Qt event loop; a queued singleShot would
+    # never fire and its pending Python-holding event would be destroyed
+    # during Qt static teardown, after Python finalization -> SIGSEGV.
+    # Run synchronously and drain any events posted by the tests.
+    exit_code = main()
+    core_app = QtCore.QCoreApplication.instance()
+    if core_app is not None:
+        core_app.processEvents()
+    sys.exit(exit_code)

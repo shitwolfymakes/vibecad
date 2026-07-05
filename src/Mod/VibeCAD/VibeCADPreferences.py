@@ -15,19 +15,30 @@ from pathlib import Path
 import FreeCAD as App
 
 from VibeCADAuth import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
     delete_keyring_key,
+    list_provider_models,
+    resolve_auth_credential,
     resolve_auth_state,
     store_keyring_key,
-    validate_configured_openai_auth,
-    validate_openai_api_key,
+    validate_api_key,
+    validate_configured_auth,
 )
 from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
 
 
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+DEFAULT_MODELS = {"openai": DEFAULT_MODEL, "anthropic": DEFAULT_ANTHROPIC_MODEL}
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT = "high"
+
+
+def normalize_provider(value: str | None) -> str:
+    clean = (value or "").strip().lower()
+    return clean if clean in PROVIDERS else DEFAULT_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -37,13 +48,22 @@ class VibeCADSettings:
     dotenv_path: str = ""
     disabled_workbenches: tuple[str, ...] = ()
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
-    allow_primitive_provider_tools: bool = False
+    provider: str = DEFAULT_PROVIDER
+    anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
+    enable_build_script: bool = False
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
         if not self.dotenv_path:
             return None
         return Path(self.dotenv_path).expanduser()
+
+    @property
+    def active_model(self) -> str:
+        """Model for the selected provider (legacy Model key is the OpenAI slot)."""
+        if normalize_provider(self.provider) == "anthropic":
+            return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+        return self.model.strip() or DEFAULT_MODEL
 
 
 def preferences():
@@ -81,7 +101,10 @@ def load_settings() -> VibeCADSettings:
         reasoning_effort=normalize_reasoning_effort(
             pref.GetString("ReasoningEffort", DEFAULT_REASONING_EFFORT)
         ),
-        allow_primitive_provider_tools=pref.GetBool("AllowPrimitiveProviderTools", False),
+        provider=normalize_provider(pref.GetString("Provider", DEFAULT_PROVIDER)),
+        anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
+        or DEFAULT_ANTHROPIC_MODEL,
+        enable_build_script=pref.GetBool("EnableBuildScript", False),
     )
 
 
@@ -90,9 +113,18 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetBool("UseOnlineProvider", bool(settings.use_online_provider))
     pref.SetString("Model", settings.model.strip() or DEFAULT_MODEL)
     pref.SetString("DotenvPath", settings.dotenv_path.strip())
-    pref.SetString("DisabledWorkbenches", _format_disabled_workbenches(settings.disabled_workbenches))
-    pref.SetString("ReasoningEffort", normalize_reasoning_effort(settings.reasoning_effort))
-    pref.SetBool("AllowPrimitiveProviderTools", bool(settings.allow_primitive_provider_tools))
+    pref.SetString(
+        "DisabledWorkbenches",
+        _format_disabled_workbenches(settings.disabled_workbenches),
+    )
+    pref.SetString(
+        "ReasoningEffort", normalize_reasoning_effort(settings.reasoning_effort)
+    )
+    pref.SetString("Provider", normalize_provider(settings.provider))
+    pref.SetString(
+        "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+    )
+    pref.SetBool("EnableBuildScript", bool(settings.enable_build_script))
 
 
 def reset_settings() -> None:
@@ -102,7 +134,9 @@ def reset_settings() -> None:
     pref.RemString("DotenvPath")
     pref.RemString("DisabledWorkbenches")
     pref.RemString("ReasoningEffort")
-    pref.RemBool("AllowPrimitiveProviderTools")
+    pref.RemString("Provider")
+    pref.RemString("AnthropicModel")
+    pref.RemBool("EnableBuildScript")
 
 
 def configured_dotenv_path() -> Path | None:
@@ -113,30 +147,77 @@ def configured_dotenv_path() -> Path | None:
     return cwd_dotenv if cwd_dotenv.exists() else None
 
 
-class PreferencesPage:
+def fetch_models_for_provider(
+    provider: str,
+    dotenv_path: Path | None = None,
+) -> dict:
+    """Resolve the configured key for ``provider`` and query its models endpoint.
+
+    Returns the ``list_provider_models`` payload:
+    {"ok": bool, "models": [str, ...], "error": str | None}.
+    """
+    clean_provider = normalize_provider(provider)
+    credential = resolve_auth_credential(
+        dotenv_path=dotenv_path, provider=clean_provider
+    )
+    if credential is None:
+        display = PROVIDERS[clean_provider].display_name
+        return {
+            "ok": False,
+            "models": [],
+            "error": f"No {display} API key is configured.",
+        }
+    return list_provider_models(credential.value, provider=clean_provider)
+
+
+class VibeCADPreferencesPage:
     def __init__(self, parent=None):
         from PySide import QtCore, QtWidgets
 
         self.form = QtWidgets.QWidget(parent)
         self.form.setObjectName("VibeCADPreferencesPage")
+        self.form.setWindowTitle("VibeCAD")
         layout = QtWidgets.QFormLayout(self.form)
 
         self.use_online = QtWidgets.QCheckBox(self.form)
         self.use_online.setObjectName("VibeCADPrefUseOnlineProvider")
-        layout.addRow("Use OpenAI provider", self.use_online)
+        layout.addRow("Use online provider", self.use_online)
 
-        self.model = QtWidgets.QLineEdit(self.form)
+        self.provider = QtWidgets.QComboBox(self.form)
+        self.provider.setObjectName("VibeCADPrefProvider")
+        for provider_id in sorted(PROVIDERS):
+            self.provider.addItem(PROVIDERS[provider_id].display_name, provider_id)
+        self.provider.currentIndexChanged.connect(self._provider_changed)
+        layout.addRow("Provider", self.provider)
+
+        self.model = QtWidgets.QComboBox(self.form)
         self.model.setObjectName("VibeCADPrefModel")
-        layout.addRow("Model", self.model)
+        self.model.setEditable(True)
+        layout.addRow("OpenAI model", self.model)
+
+        self.anthropic_model = QtWidgets.QComboBox(self.form)
+        self.anthropic_model.setObjectName("VibeCADPrefAnthropicModel")
+        self.anthropic_model.setEditable(True)
+        layout.addRow("Anthropic model", self.anthropic_model)
+
+        self.fetch_models = QtWidgets.QPushButton("Fetch models", self.form)
+        self.fetch_models.setObjectName("VibeCADPrefFetchModels")
+        self.fetch_models.clicked.connect(self._fetch_models)
+        layout.addRow("", self.fetch_models)
 
         self.reasoning_effort = QtWidgets.QComboBox(self.form)
         self.reasoning_effort.setObjectName("VibeCADPrefReasoningEffort")
         self.reasoning_effort.addItems(REASONING_EFFORTS)
         layout.addRow("Reasoning effort", self.reasoning_effort)
 
-        self.allow_primitives = QtWidgets.QCheckBox(self.form)
-        self.allow_primitives.setObjectName("VibeCADPrefAllowPrimitiveProviderTools")
-        layout.addRow("Expose Part primitive tools", self.allow_primitives)
+        self.enable_build_script = QtWidgets.QCheckBox(self.form)
+        self.enable_build_script.setObjectName("VibeCADPrefEnableBuildScript")
+        self.enable_build_script.setToolTip(
+            "When enabled, the assistant writes FreeCAD Python scripts through "
+            "model.build_from_script and all structured write tools are disabled. "
+            "Read and view tools stay available in both modes."
+        )
+        layout.addRow("Script mode (advanced)", self.enable_build_script)
 
         dotenv_row = QtWidgets.QHBoxLayout()
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
@@ -152,7 +233,7 @@ class PreferencesPage:
         self.api_key = QtWidgets.QLineEdit(self.form)
         self.api_key.setObjectName("VibeCADPrefApiKey")
         self.api_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.api_key.setPlaceholderText("Paste an OpenAI API key")
+        self.api_key.setPlaceholderText("Paste an API key for the selected provider")
         save_key = QtWidgets.QPushButton("Save Key", self.form)
         save_key.setObjectName("VibeCADPrefSaveApiKey")
         save_key.clicked.connect(self._save_api_key)
@@ -166,7 +247,7 @@ class PreferencesPage:
         api_key_row.addWidget(save_key)
         api_key_row.addWidget(validate)
         api_key_row.addWidget(logout)
-        layout.addRow("OpenAI API key", api_key_row)
+        layout.addRow("API key", api_key_row)
 
         self.status = QtWidgets.QLabel(self.form)
         self.status.setObjectName("VibeCADPrefAuthStatus")
@@ -201,8 +282,43 @@ class PreferencesPage:
             self.dotenv_path.setText(selected)
             self._refresh_status()
 
+    def _selected_provider(self) -> str:
+        data = self.provider.currentData()
+        return normalize_provider(data if isinstance(data, str) else None)
+
+    def _provider_changed(self, _index: int = 0) -> None:
+        self.api_key.clear()
+        self._refresh_status()
+
+    def _set_combo_text(self, combo, text: str) -> None:
+        index = combo.findText(text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setEditText(text)
+
+    def _fetch_models(self) -> None:
+        provider = self._selected_provider()
+        settings = self._current_settings()
+        result = fetch_models_for_provider(
+            provider, dotenv_path=settings.resolved_dotenv_path
+        )
+        if not result["ok"]:
+            self.status.setText(f"models_error | {result['error']}")
+            return
+        combo = self.anthropic_model if provider == "anthropic" else self.model
+        current = combo.currentText().strip()
+        combo.clear()
+        combo.addItems(result["models"])
+        if current:
+            self._set_combo_text(combo, current)
+        display = PROVIDERS[provider].display_name
+        self.status.setText(f"models_ok | {display} | {len(result['models'])} models")
+
     def _save_api_key(self) -> None:
-        result = store_keyring_key(self.api_key.text())
+        result = store_keyring_key(
+            self.api_key.text(), provider=self._selected_provider()
+        )
         self.api_key.clear()
         if not result["stored"]:
             self.status.setText(f"not_configured | {result['error']}")
@@ -210,18 +326,22 @@ class PreferencesPage:
         self._refresh_status()
 
     def _logout(self) -> None:
-        delete_keyring_key()
+        delete_keyring_key(provider=self._selected_provider())
         self.api_key.clear()
         self._refresh_status()
 
     def _validate_auth(self) -> None:
+        provider = self._selected_provider()
         typed_key = self.api_key.text().strip()
         if typed_key:
-            auth = validate_openai_api_key(typed_key, source="unsaved API key")
+            auth = validate_api_key(
+                typed_key, provider=provider, source="unsaved API key"
+            )
             self.api_key.clear()
         else:
-            auth = validate_configured_openai_auth(
-                dotenv_path=self._current_settings().resolved_dotenv_path
+            auth = validate_configured_auth(
+                provider=provider,
+                dotenv_path=self._current_settings().resolved_dotenv_path,
             )
         source = f" | {auth.source}" if auth.source else ""
         key = f" | {auth.redacted_key}" if auth.redacted_key else ""
@@ -238,16 +358,24 @@ class PreferencesPage:
                 disabled.append(item.text())
         return VibeCADSettings(
             use_online_provider=self.use_online.isChecked(),
-            model=self.model.text().strip() or DEFAULT_MODEL,
+            model=self.model.currentText().strip() or DEFAULT_MODEL,
             dotenv_path=self.dotenv_path.text().strip(),
             disabled_workbenches=tuple(disabled),
-            reasoning_effort=normalize_reasoning_effort(self.reasoning_effort.currentText()),
-            allow_primitive_provider_tools=self.allow_primitives.isChecked(),
+            reasoning_effort=normalize_reasoning_effort(
+                self.reasoning_effort.currentText()
+            ),
+            provider=self._selected_provider(),
+            anthropic_model=self.anthropic_model.currentText().strip()
+            or DEFAULT_ANTHROPIC_MODEL,
+            enable_build_script=self.enable_build_script.isChecked(),
         )
 
     def _refresh_status(self) -> None:
         settings = self._current_settings()
-        auth = resolve_auth_state(dotenv_path=settings.resolved_dotenv_path)
+        auth = resolve_auth_state(
+            dotenv_path=settings.resolved_dotenv_path,
+            provider=self._selected_provider(),
+        )
         source = f" | {auth.source}" if auth.source else ""
         key = f" | {auth.redacted_key}" if auth.redacted_key else ""
         self.status.setText(f"{auth.status.value}{source}{key}")
@@ -260,15 +388,20 @@ class PreferencesPage:
 
         settings = load_settings()
         self.use_online.setChecked(settings.use_online_provider)
-        self.model.setText(settings.model)
+        provider_index = self.provider.findData(normalize_provider(settings.provider))
+        self.provider.setCurrentIndex(provider_index if provider_index >= 0 else 0)
+        self._set_combo_text(self.model, settings.model)
+        self._set_combo_text(self.anthropic_model, settings.anthropic_model)
         index = self.reasoning_effort.findText(settings.reasoning_effort)
         self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
-        self.allow_primitives.setChecked(settings.allow_primitive_provider_tools)
         self.dotenv_path.setText(settings.dotenv_path)
+        self.enable_build_script.setChecked(settings.enable_build_script)
         disabled = set(settings.disabled_workbenches)
         for index in range(self.tool_packs.count()):
             item = self.tool_packs.item(index)
-            state = QtCore.Qt.Unchecked if item.text() in disabled else QtCore.Qt.Checked
+            state = (
+                QtCore.Qt.Unchecked if item.text() in disabled else QtCore.Qt.Checked
+            )
             item.setCheckState(state)
         self.api_key.clear()
         self._refresh_status()

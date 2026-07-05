@@ -11,15 +11,22 @@ from .common import active_response, get_sketch, no_sketch, run_freecad_transact
 
 TOOL_SPEC = {
     "name": "sketcher.draw_rectangle",
-    "description": "Draw a constrained rectangle in the active Sketcher sketch using the Sketcher rectangle workflow result. Use XY plane/origin defaults unless the user specifies otherwise.",
+    "description": (
+        "Draw a fully constrained rectangle in the active Sketcher sketch. Convenience shortcut "
+        "for the common four-line case — use sketcher.add_geometry kind='polyline' for other "
+        "closed profiles."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
-            "width": {"type": "number"},
-            "height": {"type": "number"},
-            "center_x": {"type": "number"},
-            "center_y": {"type": "number"},
-            "sketch_name": {"type": "string"},
+            "width": {"type": "number", "description": "Rectangle width in mm along sketch X."},
+            "height": {"type": "number", "description": "Rectangle height in mm along sketch Y."},
+            "center_x": {"type": "number", "description": "Center X in mm. Default 0."},
+            "center_y": {"type": "number", "description": "Center Y in mm. Default 0."},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
         },
         "required": ["width", "height"],
     },

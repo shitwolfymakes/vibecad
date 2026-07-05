@@ -4,14 +4,21 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
 
 
-TOOL_SPEC = {'description': 'Delete an existing FreeCAD object by internal name or label so the '
-                'assistant can correct a bad modeling step and continue.',
+TOOL_SPEC = {'description': 'Delete an object from the active document by internal name or '
+                'label. Use to remove a bad modeling step; prefer '
+                'core.undo_last_vibecad_action to roll back the most recent action.',
  'name': 'core.delete_object',
- 'parameters': {'properties': {'object_name': {'type': 'string'},
-                               'reason': {'type': 'string'}},
+ 'parameters': {'properties': {'object_name': {'description': 'Internal name or label of '
+                                                              'the object to delete.',
+                                               'type': 'string'},
+                               'reason': {'description': 'Short reason for the deletion, '
+                                                         'recorded in the transaction log.',
+                                          'type': 'string'}},
                 'required': ['object_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE'}

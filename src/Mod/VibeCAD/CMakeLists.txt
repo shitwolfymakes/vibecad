@@ -19,6 +19,10 @@ set(VibeCAD_Scripts
 
 set(VibeCAD_Resources
     preferences-vibecad.svg
+    vibecad-open-assistant.svg
+    vibecad-send.svg
+    vibecad-stop.svg
+    vibecad-activity.svg
 )
 
 file(GLOB VibeCAD_ProviderToolScripts
@@ -33,8 +37,14 @@ file(GLOB_RECURSE VibeCAD_ToolImplScripts
     tool_impl/*.py
 )
 
+file(GLOB VibeCAD_TestScripts
+    CONFIGURE_DEPENDS
+    RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+    vibecad_tests/*.py
+)
+
 add_custom_target(VibeCADScripts ALL
-    SOURCES ${VibeCAD_Scripts} ${VibeCAD_ProviderToolScripts} ${VibeCAD_ToolImplScripts} ${VibeCAD_Resources}
+    SOURCES ${VibeCAD_Scripts} ${VibeCAD_ProviderToolScripts} ${VibeCAD_ToolImplScripts} ${VibeCAD_TestScripts} ${VibeCAD_Resources}
 )
 
 fc_target_copy_resource(VibeCADScripts
@@ -43,6 +53,7 @@ fc_target_copy_resource(VibeCADScripts
     ${VibeCAD_Scripts}
     ${VibeCAD_ProviderToolScripts}
     ${VibeCAD_ToolImplScripts}
+    ${VibeCAD_TestScripts}
     ${VibeCAD_Resources}
 )
 
@@ -66,6 +77,15 @@ install(
 install(
     DIRECTORY
         tool_impl
+    DESTINATION
+        Mod/VibeCAD
+    FILES_MATCHING
+        PATTERN "*.py"
+)
+
+install(
+    DIRECTORY
+        vibecad_tests
     DESTINATION
         Mod/VibeCAD
     FILES_MATCHING

@@ -11,8 +11,10 @@ from VibeCADTransactions import run_freecad_transaction
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Create a native PartDesign Boolean feature in a target Body using '
-                'one or more other PartDesign Bodies as tools.',
+ 'description': 'Create a native PartDesign Boolean feature (fuse/cut/common) in a '
+                'target Body using other Bodies as tools. Use to combine or subtract '
+                'separately modeled components — e.g. cut a rotor cavity out of a '
+                'housing Body. Tool Bodies are consumed by the Boolean.',
  'name': 'partdesign.boolean_bodies',
  'parameters': {'properties': {'label': {'type': 'string'},
                                'operation': {'description': 'Boolean operation: fuse, cut, or common.',
@@ -116,15 +118,19 @@ def run(
     effective = not isinstance(feature_effect, dict) or bool(feature_effect.get("ok"))
     ok = bool(transaction.get("ok")) and effective
     error = None
+    likely_cause = None
     if not transaction.get("ok"):
         error = transaction.get("error") or "PartDesign Boolean failed."
     elif not effective:
-        rollback_note = (
-            " It was removed automatically to keep the Body tip coherent."
-            if transaction_result.get("rolled_back_feature")
-            else ""
+        error, likely_cause = domain_runtime.describe_ineffective_partdesign_feature(
+            "boolean",
+            feature_shape=transaction_result.get("feature_shape"),
+            feature_effect=feature_effect,
+            feature_state=transaction_result.get("feature_state"),
+            report_errors=domain_runtime.recompute_errors(transaction),
+            rolled_back=bool(transaction_result.get("rolled_back_feature")),
+            lead_in="PartDesign Boolean was created but did not produce an effective body shape change.",
         )
-        error = f"PartDesign Boolean was created but did not produce an effective body shape change.{rollback_note}"
     return {
         "ok": ok,
         **({"error": error, "recoverable": True} if error else {}),
@@ -132,6 +138,8 @@ def run(
         "partdesign": domain_runtime.partdesign_summary(service),
         "active_feature": transaction_result.get("feature"),
         "feature_shape": transaction_result.get("feature_shape"),
+        "feature_state": transaction_result.get("feature_state"),
+        "likely_cause": likely_cause,
         "body_shape_before": transaction_result.get("body_shape_before"),
         "body_shape_after": transaction_result.get("body_shape_after"),
         "body_shape_delta": transaction_result.get("body_shape_delta"),

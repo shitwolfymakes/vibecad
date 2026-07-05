@@ -4,25 +4,35 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Add a native TechDraw part view for a model object to an existing '
-                'drawing page.',
+TOOL_SPEC = {'description': 'Add a TechDraw part view of a model object to an existing drawing '
+                'page (create one first with techdraw.create_page).',
  'name': 'techdraw.add_view',
- 'parameters': {'properties': {'label': {'type': 'string'},
+ 'parameters': {'properties': {'label': {'description': 'View label shown in the '
+                                                        'document tree.',
+                                         'type': 'string'},
                                'page_name': {'description': 'TechDraw page object name '
                                                             'or label. Defaults to the '
                                                             'first page.',
                                              'type': 'string'},
-                               'scale': {'type': 'number'},
+                               'scale': {'description': 'View scale factor (default '
+                                                        '1.0).',
+                                         'type': 'number'},
                                'source_name': {'description': 'Model object name or '
                                                               'label to show in the '
                                                               'drawing view.',
                                                'type': 'string'},
-                               'x': {'type': 'number'},
-                               'y': {'type': 'number'}},
+                               'x': {'description': 'View X position on the page in '
+                                                    'mm (default 100).',
+                                     'type': 'number'},
+                               'y': {'description': 'View Y position on the page in '
+                                                    'mm (default 100).',
+                                     'type': 'number'}},
                 'required': ['source_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

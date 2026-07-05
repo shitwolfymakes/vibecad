@@ -20,8 +20,14 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "geometry_handle": {"type": "string"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "geometry_handle": {
+                "type": "string",
+                "description": "Handle to resolve: geometry:N, name:X, origin, axis:H, axis:V, or external:N.",
+            },
         },
         "required": ["geometry_handle"],
     },

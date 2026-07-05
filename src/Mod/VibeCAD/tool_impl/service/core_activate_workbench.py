@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Activate a FreeCAD workbench by internal workbench name.',
+TOOL_SPEC = {'description': 'Internal VibeCAD session tool: switch the live FreeCAD GUI '
+                'workbench without refreshing the workspace tool pack. Models '
+                'switch workspaces with core.enter_workspace instead.',
  'name': 'core.activate_workbench',
  'parameters': {'properties': {'name': {'description': 'Workbench name such as '
                                                        'PartWorkbench or '

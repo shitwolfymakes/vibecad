@@ -20,17 +20,20 @@ TOOL_SPEC = {'contextual': True,
                                                                     'when hole_cut_type '
                                                                     'is 2.',
                                                      'type': 'number'},
-                               'depth': {'type': 'number'},
+                               'depth': {'description': 'Hole depth in mm when depth_type is 0 (default 10).',
+                                         'type': 'number'},
                                'depth_type': {'description': 'Native Hole DepthType '
                                                             'integer. 0 is blind '
                                                             'depth; 1 is through all.',
                                               'type': 'integer'},
-                               'diameter': {'type': 'number'},
+                               'diameter': {'description': 'Hole diameter in mm (default 5).',
+                                            'type': 'number'},
                                'drill_point': {'description': 'Native DrillPoint '
                                                              'integer. 0 is flat; '
                                                              '1 is angled.',
                                                'type': 'integer'},
-                               'drill_point_angle': {'type': 'number'},
+                               'drill_point_angle': {'description': 'Drill tip angle in degrees when drill_point is 1.',
+                                                     'type': 'number'},
                                'hole_cut_depth': {'description': 'Counterbore depth '
                                                                 'when hole_cut_type '
                                                                 'is 1.',
@@ -57,9 +60,12 @@ TOOL_SPEC = {'contextual': True,
                                                                       'of the support '
                                                                       'plane.',
                                                        'type': 'boolean'},
-                               'sketch_name': {'type': 'string'},
-                               'tapered': {'type': 'boolean'},
-                               'tapered_angle': {'type': 'number'},
+                               'sketch_name': {'description': 'Sketch (name or label) holding the hole center points/circles.',
+                                               'type': 'string'},
+                               'tapered': {'description': 'Enable a tapered hole.',
+                                           'type': 'boolean'},
+                               'tapered_angle': {'description': 'Taper angle in degrees when tapered is true.',
+                                                 'type': 'number'},
                                'thread_type': {'description': 'Native ThreadType '
                                                              'integer. Use 0 for '
                                                              'plain unthreaded holes.',
@@ -191,15 +197,19 @@ def run(
     effective = not isinstance(feature_effect, dict) or bool(feature_effect.get("ok"))
     ok = bool(transaction.get("ok")) and effective
     error = None
+    likely_cause = None
     if not transaction.get("ok"):
         error = transaction.get("error") or "PartDesign Hole failed."
     elif not effective:
-        rollback_note = (
-            " It was removed automatically to keep the Body tip coherent."
-            if transaction_result.get("rolled_back_feature")
-            else ""
+        error, likely_cause = domain_runtime.describe_ineffective_partdesign_feature(
+            "hole",
+            feature_shape=transaction_result.get("feature_shape"),
+            feature_effect=feature_effect,
+            feature_state=transaction_result.get("feature_state"),
+            report_errors=domain_runtime.recompute_errors(transaction),
+            rolled_back=bool(transaction_result.get("rolled_back_feature")),
+            lead_in="PartDesign Hole was created but did not remove material from the body.",
         )
-        error = f"PartDesign Hole was created but did not remove material from the body.{rollback_note}"
     return {
         "ok": ok,
         **({"error": error, "recoverable": True} if error else {}),
@@ -207,6 +217,8 @@ def run(
         "partdesign": domain_runtime.partdesign_summary(service),
         "active_feature": transaction_result.get("feature"),
         "feature_shape": transaction_result.get("feature_shape"),
+        "feature_state": transaction_result.get("feature_state"),
+        "likely_cause": likely_cause,
         "body_shape_before": transaction_result.get("body_shape_before"),
         "body_shape_after": transaction_result.get("body_shape_after"),
         "body_shape_delta": transaction_result.get("body_shape_delta"),

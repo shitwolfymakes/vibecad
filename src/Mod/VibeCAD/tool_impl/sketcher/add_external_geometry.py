@@ -18,16 +18,24 @@ from .common import (
 
 TOOL_SPEC = {
     "name": "sketcher.add_external_geometry",
-    "description": "Add one native Sketcher external geometry reference from an existing document object subelement, equivalent to the Sketcher external geometry tool.",
+    "description": (
+        "Add one native Sketcher external geometry reference from an existing document object "
+        "subelement, equivalent to the Sketcher external geometry tool. Use to constrain sketch "
+        "geometry against edges/vertices of existing solids or other sketches; find candidates "
+        "with sketcher.inspect_sketch include=['reference_geometry']."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "source_object": {"type": "string"},
-            "subelement": {"type": "string"},
-            "defining": {"type": "boolean"},
-            "intersection": {"type": "boolean"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "source_object": {"type": "string", "description": "Document object name providing the subelement."},
+            "subelement": {"type": "string", "description": "Subelement name on the source object, e.g. Edge1 or Vertex2."},
+            "defining": {"type": "boolean", "description": "Import as defining (driving) geometry. Default false (reference only)."},
+            "intersection": {"type": "boolean", "description": "Project the subelement's intersection with the sketch plane. Default false."},
         },
         "required": ["source_object", "subelement"],
     },

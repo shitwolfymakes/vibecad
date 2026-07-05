@@ -60,6 +60,9 @@ public:
     Py::Object addStatusBarItem(const Py::Tuple&, const Py::Dict&);
     Py::Object removeStatusBarItem(const Py::Tuple&);
 
+    Py::Object addDockWindow(const Py::Tuple&, const Py::Dict&);
+    Py::Object removeDockWindow(const Py::Tuple&);
+
 private:
     QPointer<MainWindow> _mw;
 };

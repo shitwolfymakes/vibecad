@@ -6,9 +6,12 @@ from __future__ import annotations
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Return readable properties for an active-document object.',
+ 'description': 'Return all readable properties of one active-document object; use '
+                'core.list_workbench_objects to survey many objects at once.',
  'name': 'core.get_object_properties',
- 'parameters': {'properties': {'object_name': {'type': 'string'}},
+ 'parameters': {'properties': {'object_name': {'description': 'Internal name or label of '
+                                                              'the object to inspect.',
+                                               'type': 'string'}},
                 'required': ['object_name'],
                 'type': 'object'},
  'safety': 'READ'}

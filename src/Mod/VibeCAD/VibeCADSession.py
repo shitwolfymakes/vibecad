@@ -11,8 +11,13 @@ import time
 from typing import Any, Callable
 
 from VibeCADCore import VibeCADService, get_service
-from VibeCADProvider import BaseProvider, OfflineProvider, OpenAIAgentsProvider, ProviderUnavailable
-from VibeCADProject import PHASE_SPECS, normalize_phase
+from VibeCADProvider import (
+    AnthropicProvider,
+    BaseProvider,
+    OfflineProvider,
+    OpenAIAgentsProvider,
+    ProviderUnavailable,
+)
 from VibeCADTools import SafetyLevel
 from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
@@ -39,7 +44,7 @@ class VibeCADResponse:
 @dataclass(frozen=True)
 class ProviderToolScope:
     workbench: str | None
-    phase: str
+    stage: str
     reason: str
     tool_names: set[str] | None = None
 
@@ -55,37 +60,30 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "core.open_document",
     "core.delete_object",
     "core.report_tool_shape_gap",
-    "phase.set_current",
-    "intent.update_brief",
+    # Only surfaced when the user opts into script mode; see
+    # VibeCADService.is_tool_enabled_for_provider.
+    "model.build_from_script",
     "partdesign.create_body",
     "partdesign.create_sketch",
     "partdesign.create_datum_plane",
     "partdesign.create_datum_line",
-    "partdesign.pad_sketch",
-    "partdesign.pocket_sketch",
+    "partdesign.extrude",
     "partdesign.hole_from_sketch",
-    "partdesign.revolve_sketch",
-    "partdesign.groove_sketch",
+    "partdesign.revolve",
     "partdesign.loft_profiles",
     "partdesign.sweep_profile",
     "partdesign.helix_profile",
-    "partdesign.linear_pattern",
-    "partdesign.polar_pattern",
-    "partdesign.mirror_feature",
-    "partdesign.fillet_feature",
-    "partdesign.chamfer_feature",
-    "partdesign.thickness_feature",
-    "partdesign.draft_feature",
+    "partdesign.pattern",
+    "partdesign.dressup",
     "partdesign.boolean_bodies",
     "partdesign.set_feature_dimensions",
-    "part.create_primitive",
     "part.set_placement",
-    "part.set_primitive_dimensions",
     "part.cut_cylindrical_hole",
-    "part.apply_fillet",
-    "part.apply_chamfer",
-    "part.apply_thickness",
+    "part.dressup",
+    "part.thicken_surface",
     "draft.create_array",
+    "draft.create_wire",
+    "surface.create_surface",
     "material.apply_appearance",
     "techdraw.create_page",
     "techdraw.add_view",
@@ -96,79 +94,24 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "sketcher.open_sketch",
     "sketcher.close_sketch",
     "sketcher.set_geometry_name",
-    "sketcher.set_constraint_name",
-    "sketcher.set_constraint_value_by_name",
-    "sketcher.set_constraint_driving",
-    "sketcher.set_constraint_expression",
+    "sketcher.edit_constraint",
     "sketcher.add_external_geometry",
     "sketcher.remove_external_geometry",
-    "sketcher.add_line",
-    "sketcher.add_point",
-    "sketcher.add_polyline",
-    "sketcher.add_circle",
+    "sketcher.add_geometry",
     "sketcher.add_hole_pattern",
-    "sketcher.add_arc",
-    "sketcher.add_ellipse",
-    "sketcher.add_bspline",
     "sketcher.add_slot",
     "sketcher.add_constraint",
-    "sketcher.constrain_coincident",
-    "sketcher.constrain_horizontal",
-    "sketcher.constrain_vertical",
-    "sketcher.constrain_parallel",
-    "sketcher.constrain_perpendicular",
-    "sketcher.constrain_tangent",
-    "sketcher.constrain_equal",
-    "sketcher.constrain_distance",
-    "sketcher.constrain_distance_points",
-    "sketcher.constrain_distance_x",
-    "sketcher.constrain_distance_y",
-    "sketcher.constrain_angle_between",
-    "sketcher.constrain_lock_point",
-    "sketcher.constrain_block_geometry",
-    "sketcher.constrain_radius",
-    "sketcher.constrain_diameter",
-    "sketcher.constrain_point_on_object",
-    "sketcher.constrain_point_on_reference",
-    "sketcher.constrain_symmetric",
     "sketcher.draw_rectangle",
-    "sketcher.set_constraint_value",
     "sketcher.move_point",
     "sketcher.transform_geometry",
-    "sketcher.copy_geometry",
-    "sketcher.rectangular_array",
-    "sketcher.mirror_geometry",
-    "sketcher.offset_geometry",
-    "sketcher.trim_geometry",
-    "sketcher.extend_geometry",
-    "sketcher.split_geometry",
-    "sketcher.fillet_corner",
-    "sketcher.delete_geometry",
-    "sketcher.delete_constraint",
-    "sketcher.delete_all_geometry",
-    "sketcher.delete_all_constraints",
+    "sketcher.modify_geometry",
+    "sketcher.delete_items",
     "sketcher.set_construction",
 }
 
 DOCUMENT_MANAGEMENT_TOOLS = {
     "core.create_new_document",
     "core.open_document",
-}
-
-PROVIDER_PRIMITIVE_WRITE_TOOLS = {
-    "part.create_primitive",
-    "part.set_placement",
-    "part.set_primitive_dimensions",
-    "part.cut_cylindrical_hole",
-    "part.apply_fillet",
-    "part.apply_chamfer",
-    "part.apply_thickness",
-}
-
-PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS = {
-    "core.delete_object",
-    "part.create_primitive",
-    "partdesign.create_body",
 }
 
 PROVIDER_QUEUE_TOOLS = {
@@ -179,20 +122,26 @@ PROVIDER_QUEUE_TOOLS = {
     "core.clear_local_session",
 }
 
+# Session-internal tools that must never appear in a provider tool listing.
+# core.enter_workspace is the single model-facing workspace switcher;
+# core.activate_workbench remains callable for internal session flows only.
+INTERNAL_SESSION_TOOLS = {
+    "core.activate_workbench",
+}
+
 CORE_PROVIDER_TOOLS = {
     "core.get_active_document",
     "core.capture_view_screenshot",
     "core.get_report_view_errors",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
-    "phase.get_project_context",
-    "phase.set_current",
-    "phase.validate_document",
-    "phase.audit_workflow",
     "core.enter_workspace",
-    "core.activate_workbench",
     "core.get_object_properties",
     "core.delete_object",
+    "core.list_workbench_objects",
+    # Global script-mode write path; hidden unless the user enables script
+    # mode in preferences (VibeCADService.is_tool_enabled_for_provider).
+    "model.build_from_script",
 }
 
 PROVIDER_WORKSPACE_CONTROL_TOOLS = {
@@ -210,270 +159,20 @@ PROVIDER_WORKSPACE_CONTROL_TOOLS = {
     "core.get_object_properties",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
-    "phase.get_project_context",
-    "phase.set_current",
-    "phase.validate_document",
-    "phase.audit_workflow",
     "core.enter_workspace",
-    "core.activate_workbench",
 }
 
 WORKBENCH_READ_TOOLS = {
     "PartDesignWorkbench": {"partdesign.get_bodies"},
-    "SketcherWorkbench": {"sketcher.get_sketch"},
-    "PartWorkbench": {"part.get_objects"},
+    "SketcherWorkbench": {"sketcher.inspect_sketch"},
+    "PartWorkbench": {"core.list_workbench_objects"},
     "AssemblyWorkbench": {"assembly.get_assemblies"},
     "TechDrawWorkbench": {"techdraw.get_pages"},
-    "MaterialWorkbench": {"material.get_objects"},
-}
-
-PROVIDER_CONTEXT_CORE_TOOLS = {
-    "core.get_active_document",
-    "core.capture_view_screenshot",
-    "core.get_report_view_errors",
-    "core.get_tool_shape_report",
-    "core.report_tool_shape_gap",
-    "phase.get_project_context",
-    "phase.set_current",
-    "phase.validate_document",
-    "phase.audit_workflow",
-    "core.enter_workspace",
-    "core.activate_workbench",
-    "core.get_object_properties",
-    "core.delete_object",
-}
-
-PROVIDER_CONTEXT_READ_TOOLS = {
-    "core.get_active_document",
-    "core.capture_view_screenshot",
-    "core.get_report_view_errors",
-    "core.get_tool_shape_report",
-    "core.report_tool_shape_gap",
-    "phase.get_project_context",
-    "phase.validate_document",
-    "phase.audit_workflow",
-    "core.get_object_properties",
-}
-
-PHASE_CONTROL_TOOLS = {
-    "phase.get_project_context",
-    "phase.set_current",
-    "phase.validate_document",
-    "phase.audit_workflow",
-}
-
-INTENT_PHASE_TOOLS = {
-    "core.get_active_document",
-    "core.get_selection",
-    "core.get_view_state",
-    "core.get_task_panel",
-    "core.capture_view_screenshot",
-    "core.get_report_view_errors",
-    "phase.get_project_context",
-    "phase.set_current",
-    "phase.audit_workflow",
-    "intent.update_brief",
+    "MaterialWorkbench": {"core.list_workbench_objects"},
 }
 
 NON_GEOMETRY_PROVIDER_WRITE_TOOLS = {
-    "phase.set_current",
-    "intent.update_brief",
     "core.report_tool_shape_gap",
-}
-
-SKETCHER_INSPECT_TOOLS = {
-    "sketcher.get_sketch",
-    "sketcher.open_sketch",
-    "sketcher.close_sketch",
-    "sketcher.get_solver_status",
-    "sketcher.validate_profile",
-    "sketcher.validate_profile_deep",
-    "sketcher.diagnose_constraints",
-    "sketcher.list_geometry",
-    "sketcher.list_constraints",
-    "sketcher.resolve_geometry",
-    "sketcher.set_geometry_name",
-    "sketcher.set_constraint_name",
-    "sketcher.set_constraint_value_by_name",
-}
-
-SKETCHER_STATUS_INSPECT_TOOLS = {
-    "sketcher.get_sketch",
-    "sketcher.close_sketch",
-    "sketcher.get_solver_status",
-    "sketcher.validate_profile",
-    "sketcher.validate_profile_deep",
-    "sketcher.diagnose_constraints",
-    "sketcher.list_geometry",
-    "sketcher.list_constraints",
-    "sketcher.resolve_geometry",
-}
-
-SKETCHER_CREATE_TOOLS = {
-    "sketcher.create_sketch",
-    "sketcher.add_line",
-    "sketcher.add_point",
-    "sketcher.add_polyline",
-    "sketcher.add_circle",
-    "sketcher.add_hole_pattern",
-    "sketcher.add_arc",
-    "sketcher.add_ellipse",
-    "sketcher.add_bspline",
-    "sketcher.add_slot",
-    "sketcher.draw_rectangle",
-}
-
-SKETCHER_CONSTRAINT_TOOLS = {
-    "sketcher.add_constraint",
-    "sketcher.constrain_coincident",
-    "sketcher.constrain_horizontal",
-    "sketcher.constrain_vertical",
-    "sketcher.constrain_parallel",
-    "sketcher.constrain_perpendicular",
-    "sketcher.constrain_tangent",
-    "sketcher.constrain_equal",
-    "sketcher.constrain_distance",
-    "sketcher.constrain_distance_points",
-    "sketcher.constrain_distance_x",
-    "sketcher.constrain_distance_y",
-    "sketcher.constrain_angle_between",
-    "sketcher.constrain_lock_point",
-    "sketcher.constrain_block_geometry",
-    "sketcher.constrain_radius",
-    "sketcher.constrain_diameter",
-    "sketcher.constrain_point_on_object",
-    "sketcher.constrain_point_on_reference",
-    "sketcher.constrain_symmetric",
-    "sketcher.get_constraint_by_name",
-    "sketcher.set_constraint_value",
-    "sketcher.set_constraint_driving",
-    "sketcher.set_constraint_expression",
-}
-
-SKETCHER_PROFILE_CLOSURE_CONSTRAINT_TOOLS = {
-    "sketcher.add_constraint",
-    "sketcher.constrain_coincident",
-    "sketcher.constrain_horizontal",
-    "sketcher.constrain_vertical",
-    "sketcher.constrain_parallel",
-    "sketcher.constrain_perpendicular",
-    "sketcher.constrain_tangent",
-    "sketcher.constrain_equal",
-    "sketcher.constrain_point_on_object",
-    "sketcher.constrain_point_on_reference",
-    "sketcher.constrain_symmetric",
-}
-
-SKETCHER_EDIT_TOOLS = {
-    "sketcher.move_point",
-    "sketcher.transform_geometry",
-    "sketcher.copy_geometry",
-    "sketcher.rectangular_array",
-    "sketcher.mirror_geometry",
-    "sketcher.offset_geometry",
-    "sketcher.trim_geometry",
-    "sketcher.extend_geometry",
-    "sketcher.split_geometry",
-    "sketcher.fillet_corner",
-    "sketcher.add_external_geometry",
-    "sketcher.remove_external_geometry",
-    "sketcher.delete_geometry",
-    "sketcher.delete_constraint",
-    "sketcher.delete_all_geometry",
-    "sketcher.delete_all_constraints",
-    "sketcher.set_construction",
-}
-
-SKETCHER_LOCAL_EDIT_TOOLS = {
-    "sketcher.move_point",
-    "sketcher.transform_geometry",
-    "sketcher.delete_geometry",
-    "sketcher.delete_constraint",
-    "sketcher.delete_all_geometry",
-    "sketcher.delete_all_constraints",
-    "sketcher.set_construction",
-}
-
-SKETCHER_REPAIR_TOOLS = {
-    "sketcher.trim_geometry",
-    "sketcher.extend_geometry",
-    "sketcher.split_geometry",
-    "sketcher.fillet_corner",
-    "sketcher.add_external_geometry",
-    "sketcher.remove_external_geometry",
-}
-
-SKETCHER_DERIVED_EDIT_TOOLS = {
-    "sketcher.copy_geometry",
-    "sketcher.rectangular_array",
-    "sketcher.mirror_geometry",
-    "sketcher.offset_geometry",
-}
-
-SKETCHER_MINIMAL_CREATE_TOOLS = {
-    "sketcher.add_line",
-    "sketcher.add_point",
-    "sketcher.add_circle",
-    "sketcher.add_hole_pattern",
-    "sketcher.add_arc",
-    "sketcher.add_slot",
-    "sketcher.draw_rectangle",
-}
-
-PARTDESIGN_SETUP_TOOLS = {
-    "partdesign.get_bodies",
-    "partdesign.create_body",
-    "partdesign.create_sketch",
-    "partdesign.create_datum_plane",
-    "partdesign.create_datum_line",
-}
-
-PARTDESIGN_FEATURE_TOOLS = {
-    "partdesign.pad_sketch",
-    "partdesign.pocket_sketch",
-    "partdesign.hole_from_sketch",
-    "partdesign.revolve_sketch",
-    "partdesign.groove_sketch",
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-    "partdesign.helix_profile",
-    "partdesign.linear_pattern",
-    "partdesign.polar_pattern",
-    "partdesign.mirror_feature",
-    "partdesign.fillet_feature",
-    "partdesign.chamfer_feature",
-    "partdesign.thickness_feature",
-    "partdesign.draft_feature",
-    "partdesign.boolean_bodies",
-    "partdesign.set_feature_dimensions",
-}
-
-PARTDESIGN_BASE_FEATURE_TOOLS = {
-    "partdesign.pad_sketch",
-    "partdesign.pocket_sketch",
-    "partdesign.hole_from_sketch",
-    "partdesign.revolve_sketch",
-    "partdesign.groove_sketch",
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-}
-
-PARTDESIGN_FEATURE_REVISION_TOOLS = {
-    "partdesign.linear_pattern",
-    "partdesign.polar_pattern",
-    "partdesign.mirror_feature",
-    "partdesign.fillet_feature",
-    "partdesign.chamfer_feature",
-    "partdesign.thickness_feature",
-    "partdesign.draft_feature",
-    "partdesign.boolean_bodies",
-    "partdesign.set_feature_dimensions",
-}
-
-PARTDESIGN_ADVANCED_PROFILE_TOOLS = {
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-    "partdesign.helix_profile",
 }
 
 WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
@@ -486,100 +185,14 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "fully constrain sketch geometry and dimensions",
             "verify sketch DoF is 0 before pad/pocket/revolve/sweep/loft",
             "create native PartDesign features",
-            "add requested detail features chosen by the model",
+            "add requested detail features chosen by the model (fillets, chamfers, "
+            "drafts, and shell/hollow wall thickness via partdesign.dressup "
+            "operation='thickness' for housings, enclosures, and castings)",
             "inspect document state and screenshot when visual judgement matters",
         ],
         "completion_gates": [
             "no sketch with geometry may remain under-constrained",
-            "PartDesign solids require native PartDesign features, not Part primitive substitutes",
-        ],
-        "preferred_tools": [
-            "partdesign.create_body",
-            "partdesign.create_sketch",
-            "partdesign.create_datum_plane",
-            "partdesign.create_datum_line",
-            "sketcher.open_sketch",
-            "sketcher.close_sketch",
-            "sketcher.get_solver_status",
-            "sketcher.validate_profile",
-            "sketcher.validate_profile_deep",
-            "sketcher.diagnose_constraints",
-            "sketcher.list_geometry",
-            "sketcher.list_constraints",
-            "sketcher.resolve_geometry",
-            "sketcher.set_geometry_name",
-            "sketcher.list_reference_geometry",
-            "sketcher.list_external_geometry",
-            "sketcher.add_line",
-            "sketcher.add_point",
-            "sketcher.add_polyline",
-            "sketcher.add_circle",
-            "sketcher.add_hole_pattern",
-            "sketcher.add_arc",
-            "sketcher.add_ellipse",
-            "sketcher.add_bspline",
-            "sketcher.add_slot",
-            "sketcher.draw_rectangle",
-            "sketcher.add_constraint",
-            "sketcher.constrain_coincident",
-            "sketcher.constrain_horizontal",
-            "sketcher.constrain_vertical",
-            "sketcher.constrain_parallel",
-            "sketcher.constrain_perpendicular",
-            "sketcher.constrain_tangent",
-            "sketcher.constrain_equal",
-            "sketcher.constrain_distance",
-            "sketcher.constrain_distance_points",
-            "sketcher.constrain_distance_x",
-            "sketcher.constrain_distance_y",
-            "sketcher.constrain_angle_between",
-            "sketcher.constrain_lock_point",
-            "sketcher.constrain_block_geometry",
-            "sketcher.constrain_radius",
-            "sketcher.constrain_diameter",
-            "sketcher.constrain_point_on_object",
-            "sketcher.constrain_point_on_reference",
-            "sketcher.constrain_symmetric",
-            "sketcher.get_constraint_by_name",
-            "sketcher.set_constraint_name",
-            "sketcher.set_constraint_value",
-            "sketcher.set_constraint_value_by_name",
-            "sketcher.set_constraint_driving",
-            "sketcher.set_constraint_expression",
-            "sketcher.move_point",
-            "sketcher.transform_geometry",
-            "sketcher.copy_geometry",
-            "sketcher.rectangular_array",
-            "sketcher.mirror_geometry",
-            "sketcher.offset_geometry",
-            "sketcher.trim_geometry",
-            "sketcher.extend_geometry",
-            "sketcher.split_geometry",
-            "sketcher.fillet_corner",
-            "sketcher.add_external_geometry",
-            "sketcher.remove_external_geometry",
-            "sketcher.delete_geometry",
-            "sketcher.delete_constraint",
-            "sketcher.delete_all_geometry",
-            "sketcher.delete_all_constraints",
-            "sketcher.set_construction",
-            "partdesign.pad_sketch",
-            "partdesign.pocket_sketch",
-            "partdesign.hole_from_sketch",
-            "partdesign.revolve_sketch",
-            "partdesign.groove_sketch",
-            "partdesign.loft_profiles",
-            "partdesign.sweep_profile",
-            "partdesign.helix_profile",
-            "partdesign.linear_pattern",
-            "partdesign.polar_pattern",
-            "partdesign.mirror_feature",
-            "partdesign.fillet_feature",
-            "partdesign.chamfer_feature",
-            "partdesign.thickness_feature",
-            "partdesign.draft_feature",
-            "partdesign.boolean_bodies",
-            "partdesign.set_feature_dimensions",
+            "PartDesign solids require native PartDesign features built from constrained sketches",
         ],
     },
     "SketcherWorkbench": {
@@ -597,95 +210,18 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "closed profile requests require closed_profile=true",
             "finished design sketches should be fully constrained",
         ],
-        "preferred_tools": [
-            "sketcher.create_sketch",
-            "sketcher.open_sketch",
-            "sketcher.close_sketch",
-            "sketcher.get_solver_status",
-            "sketcher.validate_profile",
-            "sketcher.validate_profile_deep",
-            "sketcher.diagnose_constraints",
-            "sketcher.list_geometry",
-            "sketcher.list_constraints",
-            "sketcher.resolve_geometry",
-            "sketcher.set_geometry_name",
-            "sketcher.list_reference_geometry",
-            "sketcher.list_external_geometry",
-            "sketcher.add_line",
-            "sketcher.add_point",
-            "sketcher.add_polyline",
-            "sketcher.add_circle",
-            "sketcher.add_hole_pattern",
-            "sketcher.add_arc",
-            "sketcher.add_ellipse",
-            "sketcher.add_bspline",
-            "sketcher.add_slot",
-            "sketcher.draw_rectangle",
-            "sketcher.add_constraint",
-            "sketcher.constrain_coincident",
-            "sketcher.constrain_horizontal",
-            "sketcher.constrain_vertical",
-            "sketcher.constrain_parallel",
-            "sketcher.constrain_perpendicular",
-            "sketcher.constrain_tangent",
-            "sketcher.constrain_equal",
-            "sketcher.constrain_distance",
-            "sketcher.constrain_distance_points",
-            "sketcher.constrain_distance_x",
-            "sketcher.constrain_distance_y",
-            "sketcher.constrain_angle_between",
-            "sketcher.constrain_lock_point",
-            "sketcher.constrain_block_geometry",
-            "sketcher.constrain_radius",
-            "sketcher.constrain_diameter",
-            "sketcher.constrain_point_on_object",
-            "sketcher.constrain_point_on_reference",
-            "sketcher.constrain_symmetric",
-            "sketcher.get_constraint_by_name",
-            "sketcher.set_constraint_name",
-            "sketcher.set_constraint_value",
-            "sketcher.set_constraint_value_by_name",
-            "sketcher.set_constraint_driving",
-            "sketcher.set_constraint_expression",
-            "sketcher.move_point",
-            "sketcher.transform_geometry",
-            "sketcher.copy_geometry",
-            "sketcher.rectangular_array",
-            "sketcher.mirror_geometry",
-            "sketcher.offset_geometry",
-            "sketcher.trim_geometry",
-            "sketcher.extend_geometry",
-            "sketcher.split_geometry",
-            "sketcher.fillet_corner",
-            "sketcher.add_external_geometry",
-            "sketcher.remove_external_geometry",
-            "sketcher.delete_geometry",
-            "sketcher.delete_constraint",
-            "sketcher.delete_all_geometry",
-            "sketcher.delete_all_constraints",
-            "sketcher.set_construction",
-        ],
     },
     "PartWorkbench": {
         "mode": "direct_solid_modeling",
         "required_order": [
-            "create/select primitive or solid",
+            "select or import the solid to operate on",
             "set exact dimensions and placement",
             "apply boolean/detail operations when requested",
             "inspect shape, bounds, volume, and visible result",
         ],
         "completion_gates": [
-            "Part primitives are not substitutes for PartDesign when a parametric sketch-feature workflow is expected",
+            "Part boolean/dressup operations are not substitutes for PartDesign when a parametric sketch-feature workflow is expected",
             "direct solids require verified dimensions and placement",
-        ],
-        "preferred_tools": [
-            "part.create_primitive",
-            "part.set_placement",
-            "part.set_primitive_dimensions",
-            "part.cut_cylindrical_hole",
-            "part.apply_fillet",
-            "part.apply_chamfer",
-            "part.apply_thickness",
         ],
     },
     "AssemblyWorkbench": {
@@ -700,11 +236,6 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "assemblies require real generated components, not missing placeholders",
             "all requested components must be added to the assembly",
         ],
-        "preferred_tools": [
-            "assembly.create_assembly",
-            "assembly.add_component",
-            "assembly.set_component_placement",
-        ],
     },
     "TechDrawWorkbench": {
         "mode": "drawing_documentation",
@@ -718,10 +249,6 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
             "TechDraw is downstream of model geometry",
             "drawing requests require page and view objects",
         ],
-        "preferred_tools": [
-            "techdraw.create_page",
-            "techdraw.add_view",
-        ],
     },
     "MaterialWorkbench": {
         "mode": "appearance_and_material_assignment",
@@ -732,9 +259,6 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
         ],
         "completion_gates": [
             "appearance requests require changed target objects",
-        ],
-        "preferred_tools": [
-            "material.apply_appearance",
         ],
     },
 }
@@ -753,6 +277,8 @@ def is_provider_safe_tool(
         return False
     if tool.name in DOCUMENT_MANAGEMENT_TOOLS:
         return False
+    if tool.name in INTERNAL_SESSION_TOOLS:
+        return False
     if apply_workbench_allowlist:
         allowlist = _provider_tool_allowlist_for_workbench(workbench)
         if allowlist is not None and tool_name not in allowlist:
@@ -761,23 +287,20 @@ def is_provider_safe_tool(
         return False
     if not is_provider_tool_kind_allowed(tool.safety, tool.name):
         return False
-    if _is_primitive_tool_blocked(service, tool.name, workbench):
-        return False
-    return (
-        _is_tool_available_for_provider_context(service, tool, workbench)
-        and service.is_tool_enabled_for_provider(tool, workbench)
-    )
+    return _is_tool_available_for_provider_context(
+        service, tool, workbench
+    ) and service.is_tool_enabled_for_provider(tool, workbench)
 
 
 def _provider_tool_allowlist_for_workbench(workbench: str | None) -> set[str] | None:
     if not workbench:
         return None
-    contract = WORKBENCH_EXECUTION_CONTRACTS.get(workbench)
-    if not contract:
+    pack = get_tool_pack(workbench)
+    if pack is None:
         return None
     allowlist = set(CORE_PROVIDER_TOOLS)
     allowlist.update(WORKBENCH_READ_TOOLS.get(workbench, set()))
-    allowlist.update(str(name) for name in contract.get("preferred_tools", []) or [])
+    allowlist.update(pack.tool_names)
     return allowlist
 
 
@@ -787,88 +310,12 @@ def is_provider_tool_kind_allowed(safety: SafetyLevel, tool_name: str) -> bool:
     )
 
 
-def _is_primitive_tool_blocked(
-    service: VibeCADService,
-    tool_name: str,
-    workbench: str | None = None,
-) -> bool:
-    if workbench == "PartWorkbench":
-        return False
-    return (
-        tool_name in PROVIDER_PRIMITIVE_WRITE_TOOLS
-        and not service.allow_primitive_provider_tools()
-    )
-
-
 def _is_partdesign_sketcher_tool(tool_name: str) -> bool:
-    return tool_name in {
-        "sketcher.get_sketch",
-        "sketcher.open_sketch",
-        "sketcher.close_sketch",
-        "sketcher.get_solver_status",
-        "sketcher.validate_profile",
-        "sketcher.validate_profile_deep",
-        "sketcher.diagnose_constraints",
-        "sketcher.list_geometry",
-        "sketcher.list_constraints",
-        "sketcher.resolve_geometry",
-        "sketcher.set_geometry_name",
-        "sketcher.list_reference_geometry",
-        "sketcher.list_external_geometry",
-        "sketcher.add_line",
-        "sketcher.add_point",
-        "sketcher.add_polyline",
-        "sketcher.add_circle",
-        "sketcher.add_hole_pattern",
-        "sketcher.add_arc",
-        "sketcher.add_ellipse",
-        "sketcher.add_bspline",
-        "sketcher.add_slot",
-        "sketcher.add_constraint",
-        "sketcher.constrain_coincident",
-        "sketcher.constrain_horizontal",
-        "sketcher.constrain_vertical",
-        "sketcher.constrain_parallel",
-        "sketcher.constrain_perpendicular",
-        "sketcher.constrain_tangent",
-        "sketcher.constrain_equal",
-        "sketcher.constrain_distance",
-        "sketcher.constrain_distance_points",
-        "sketcher.constrain_distance_x",
-        "sketcher.constrain_distance_y",
-        "sketcher.constrain_angle_between",
-        "sketcher.constrain_lock_point",
-        "sketcher.constrain_block_geometry",
-        "sketcher.constrain_radius",
-        "sketcher.constrain_diameter",
-        "sketcher.constrain_point_on_object",
-        "sketcher.constrain_point_on_reference",
-        "sketcher.constrain_symmetric",
-        "sketcher.draw_rectangle",
-        "sketcher.get_constraint_by_name",
-        "sketcher.set_constraint_name",
-        "sketcher.set_constraint_value",
-        "sketcher.set_constraint_value_by_name",
-        "sketcher.set_constraint_driving",
-        "sketcher.set_constraint_expression",
-        "sketcher.move_point",
-        "sketcher.transform_geometry",
-        "sketcher.copy_geometry",
-        "sketcher.rectangular_array",
-        "sketcher.mirror_geometry",
-        "sketcher.offset_geometry",
-        "sketcher.trim_geometry",
-        "sketcher.extend_geometry",
-        "sketcher.split_geometry",
-        "sketcher.fillet_corner",
-        "sketcher.add_external_geometry",
-        "sketcher.remove_external_geometry",
-        "sketcher.delete_geometry",
-        "sketcher.delete_constraint",
-        "sketcher.delete_all_geometry",
-        "sketcher.delete_all_constraints",
-        "sketcher.set_construction",
-    }
+    """Sketcher tools usable inside PartDesign, per the PartDesign pack."""
+    pack = get_tool_pack("PartDesignWorkbench")
+    if pack is None:
+        return False
+    return tool_name.startswith("sketcher.") and tool_name in pack.tool_names
 
 
 def _is_tool_available_for_provider_context(
@@ -883,10 +330,17 @@ def _is_tool_available_for_provider_context(
     return False
 
 
-def choose_provider(service: VibeCADService, prefer_online: bool = True) -> BaseProvider:
+def choose_provider(
+    service: VibeCADService, prefer_online: bool = True
+) -> BaseProvider:
     auth = service.auth_state()
     if prefer_online and auth.can_call_provider:
-        return OpenAIAgentsProvider(
+        provider_class: type[BaseProvider] = (
+            AnthropicProvider
+            if service.provider_name() == "anthropic"
+            else OpenAIAgentsProvider
+        )
+        return provider_class(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
             reasoning_effort=service.provider_reasoning_effort(),
@@ -934,13 +388,10 @@ def run_prompt(
     entered_workspace: str | None = None
     active_workbench = active_service.active_workbench_name()
     context = active_service.provider_context_summary()
-    context["vibecad_request"] = _request_policy(clean_prompt, context)
-    phase_context = active_service.phase_context()
-    _apply_phase_provider_surface(
+    _apply_provider_surface(
         active_service,
         context,
         active_workbench,
-        phase_context=phase_context,
     )
     tool_trace: list[dict[str, Any]] = []
     visual_feedback_consumed = _context_has_satisfied_screenshot(context)
@@ -963,12 +414,14 @@ def run_prompt(
             "remaining_outcomes": context["vibecad_loop"]["remaining_outcomes"],
         },
     )
-    active_provider = provider or choose_provider(active_service, prefer_online=prefer_online)
+    active_provider = provider or choose_provider(
+        active_service, prefer_online=prefer_online
+    )
     provider_name = active_provider.__class__.__name__
     small_step_checkpoints = (
         bool(enforce_small_steps)
         if enforce_small_steps is not None
-        else isinstance(active_provider, OpenAIAgentsProvider)
+        else isinstance(active_provider, (OpenAIAgentsProvider, AnthropicProvider))
     )
     tool_runner = make_provider_tool_runner(
         active_service,
@@ -978,7 +431,6 @@ def run_prompt(
         turn_state={} if small_step_checkpoints else None,
         cancellation_check=cancellation_check,
         steering_check=steering_check,
-        request_policy=context.get("vibecad_request"),
     )
     started_at = time.monotonic()
 
@@ -1055,7 +507,9 @@ def run_prompt(
                 },
             )
             trace_count_before_turn = len(tool_trace)
-            turn_started_with_visual_feedback = _context_has_satisfied_screenshot(context)
+            turn_started_with_visual_feedback = _context_has_satisfied_screenshot(
+                context
+            )
             if isinstance(turn_state, dict):
                 turn_state["turn"] = turn_index + 1
                 turn_state["mutating_tool_calls"] = 0
@@ -1207,14 +661,7 @@ def run_prompt(
                 tool_trace,
             )
             turn_index += 1
-        raw_output = "\n\n".join(outputs)
-        final_output = _verified_document_output(
-            clean_prompt,
-            active_service,
-            raw_output,
-            tool_trace,
-            visual_feedback_consumed,
-        ) or raw_output
+        final_output = "\n\n".join(outputs)
         active_service.record_conversation_turn("user", clean_prompt)
         active_service.record_conversation_turn(
             "assistant",
@@ -1260,18 +707,13 @@ def _refresh_provider_context(
 ) -> dict[str, Any]:
     active_workbench = service.active_workbench_name()
     context = service.provider_context_summary()
-    phase_context = service.phase_context()
-    _apply_phase_provider_surface(
+    _apply_provider_surface(
         service,
         context,
         active_workbench,
-        phase_context=phase_context,
         entered_workspace=entered_workspace,
     )
     if prompt is not None:
-        request_policy = _request_policy(prompt, context)
-        context["vibecad_request"] = request_policy
-        _apply_request_policy_provider_surface(service, context, request_policy)
         context["vibecad_loop"] = _provider_loop_state(
             prompt,
             context,
@@ -1283,122 +725,37 @@ def _refresh_provider_context(
     return context
 
 
-def _apply_phase_provider_surface(
+def _apply_provider_surface(
     service: VibeCADService,
     context: dict[str, Any],
     active_workbench: str | None,
     *,
-    phase_context: dict[str, Any],
     entered_workspace: str | None = None,
 ) -> None:
-    phase = _phase_name(phase_context)
-    context["vibecad_project"] = phase_context
-    if phase == "intent":
-        _apply_intent_provider_surface(service, context, active_workbench, phase_context)
-        return
-    if _phase_requires_approved_intent(phase_context) and not _phase_intent_is_approved(phase_context):
-        _apply_intent_provider_surface(
-            service,
-            context,
-            active_workbench,
-            phase_context,
-            gated_phase=phase,
-        )
-        return
+    try:
+        context["vibecad_project"] = service.project_context()
+    except Exception:
+        context["vibecad_project"] = {}
     if entered_workspace:
         _apply_entered_workspace_provider_surface(
             service,
             context,
             active_workbench,
             entered_workspace,
-            phase_context=phase_context,
         )
         return
-    _apply_planner_provider_surface(
-        service,
-        context,
-        active_workbench,
-        phase_context=phase_context,
-    )
-
-
-def _apply_intent_provider_surface(
-    service: VibeCADService,
-    context: dict[str, Any],
-    active_workbench: str | None,
-    phase_context: dict[str, Any],
-    gated_phase: str | None = None,
-) -> None:
-    schemas = provider_safe_tool_schemas(
-        service,
-        None,
-        tool_names=INTENT_PHASE_TOOLS,
-        apply_workbench_allowlist=False,
-    )
-    phase = _phase_name(phase_context)
-    scope = {
-        "workbench": None,
-        "phase": "intent_briefing" if gated_phase is None else "intent_gate_required",
-        "reason": (
-            "Intent phase exposes no CAD geometry tools. Capture a complete "
-            "human-readable and machine-readable working brief before downstream phases."
-            if gated_phase is None
-            else (
-                f"The requested phase '{gated_phase}' needs a usable working intent "
-                "brief before CAD authoring tools are exposed."
-            )
-        ),
-        "active_tool_count": len(schemas),
-        "full_workbench_tool_count": len(schemas),
-        "omitted_tool_count": 0,
-        "active_tool_names": [schema["name"] for schema in schemas],
-    }
-    context["active_workbench"] = active_workbench
-    context["workbench"] = None
-    context["provider_tool_schemas"] = schemas
-    context["provider_tool_schemas_workbench"] = "intent"
-    context["provider_tool_scope"] = scope
-    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
-        service,
-        None,
-        schemas,
-        full_tool_count=len(schemas),
-        scope=scope,
-    )
-    context["tool_shape_report"] = service.tool_shape_report(active_workbench)
-    context["vibecad_workspace"] = {
-        "mode": "intent",
-        "active_workbench": active_workbench,
-        "entered_workbench": None,
-        "instruction": (
-            "Do not create geometry in Intent. Interview the user through concise "
-            "targeted questions only when critical information is missing. When enough "
-            "context exists, call intent.update_brief with structured requirements, "
-            "assumptions, open questions, acceptance criteria, readiness_score, "
-            "and ready_for_next_phase, then call phase.set_current for the phase "
-            "that should do the CAD work. Do not ask for approval just to proceed; "
-            "state reasonable assumptions and continue unless the request is "
-            "destructive, impossible, or materially ambiguous."
-        ),
-        "available_workspaces": [],
-        "active_phase": phase,
-        "gated_phase": gated_phase,
-    }
+    _apply_planner_provider_surface(service, context, active_workbench)
 
 
 def _apply_planner_provider_surface(
     service: VibeCADService,
     context: dict[str, Any],
     active_workbench: str | None,
-    phase_context: dict[str, Any] | None = None,
 ) -> None:
-    phase_context = phase_context or service.phase_context()
-    phase = _phase_name(phase_context)
-    allowed_workspaces = _phase_allowed_workbenches(phase_context)
     schemas = provider_safe_tool_schemas(
         service,
         None,
-        tool_names=PROVIDER_WORKSPACE_CONTROL_TOOLS | PHASE_CONTROL_TOOLS,
+        tool_names=PROVIDER_WORKSPACE_CONTROL_TOOLS,
     )
     full_active_count = len(
         provider_safe_tool_schemas(
@@ -1409,11 +766,10 @@ def _apply_planner_provider_surface(
     )
     scope = {
         "workbench": None,
-        "phase": f"{phase}_workspace_planner",
+        "stage": "workspace_planner",
         "reason": (
-            "Small phase-native control surface. Choose one allowed workspace "
-            "explicitly with core.enter_workspace before concrete CAD authoring "
-            "tools are exposed."
+            "Small workspace-control surface. Choose one workspace explicitly "
+            "with core.enter_workspace to expose its concrete CAD authoring tools."
         ),
         "active_tool_count": len(schemas),
         "full_workbench_tool_count": full_active_count,
@@ -1439,14 +795,15 @@ def _apply_planner_provider_surface(
         "entered_workbench": None,
         "instruction": (
             "Decide the next FreeCAD workspace from the user's goal and current "
-            "document state within the active VibeCAD phase. Do not design from "
-            "this control surface. Inspect if needed, validate the phase if "
-            "useful, then call core.enter_workspace with one allowed workbench "
-            "and your workspace-session goal."
+            "document state. Do not design from this control surface. For a new "
+            "design, first state a design brief: part function, real-world "
+            "reference dimensions with explicit assumptions, envelope, and an "
+            "ordered feature plan (datums/layout sketch -> base feature -> "
+            "additive -> subtractive -> patterns -> dressups last). Then call "
+            "core.enter_workspace with one workbench and a workspace-session "
+            "goal that carries the brief."
         ),
-        "available_workspaces": sorted(allowed_workspaces),
-        "active_phase": phase,
-        "phase_goal": _phase_spec(phase_context).get("goal"),
+        "available_workspaces": sorted(WORKBENCH_TOOL_PACKS),
     }
 
 
@@ -1455,45 +812,29 @@ def _apply_entered_workspace_provider_surface(
     context: dict[str, Any],
     active_workbench: str | None,
     entered_workspace: str,
-    phase_context: dict[str, Any] | None = None,
 ) -> None:
-    phase_context = phase_context or service.phase_context()
-    phase = _phase_name(phase_context)
     workspace = entered_workspace or active_workbench
-    if workspace and not _phase_allows_workbench(phase_context, workspace):
-        _apply_planner_provider_surface(
-            service,
-            context,
-            active_workbench,
-            phase_context=phase_context,
-        )
-        context["vibecad_workspace"]["blocked_workspace"] = workspace
-        context["vibecad_workspace"]["blocked_reason"] = (
-            f"{workspace} is outside the active VibeCAD phase '{phase}'."
-        )
-        return
+    scope_spec = provider_tool_scope_for_context(service, workspace)
     schemas = provider_safe_tool_schemas(
+        service,
+        workspace,
+        tool_names=scope_spec.tool_names,
+    )
+    full_schemas = provider_safe_tool_schemas(
         service,
         workspace,
         apply_workbench_allowlist=False,
     )
-    if phase != "intent":
-        schemas = [
-            schema
-            for schema in schemas
-            if schema.get("name") != "intent.update_brief"
-        ]
     scope = {
         "workbench": workspace,
-        "phase": f"{phase}_entered_workspace",
+        "stage": "entered_workspace",
         "reason": (
-            "The model explicitly entered an allowed workspace for the active "
-            "VibeCAD phase. Expose the full useful workspace tool surface plus "
-            "phase validators."
+            "The model explicitly entered a workspace. Expose the shared core "
+            "tools plus this workspace pack's tools immediately."
         ),
         "active_tool_count": len(schemas),
-        "full_workbench_tool_count": len(schemas),
-        "omitted_tool_count": 0,
+        "full_workbench_tool_count": len(full_schemas),
+        "omitted_tool_count": max(0, len(full_schemas) - len(schemas)),
         "active_tool_names": [schema["name"] for schema in schemas],
     }
     context["active_workbench"] = active_workbench
@@ -1505,7 +846,7 @@ def _apply_entered_workspace_provider_surface(
         service,
         workspace,
         schemas,
-        full_tool_count=len(schemas),
+        full_tool_count=len(full_schemas),
         scope=scope,
     )
     context["tool_shape_report"] = service.tool_shape_report(
@@ -1517,236 +858,30 @@ def _apply_entered_workspace_provider_surface(
         "mode": "workspace",
         "active_workbench": active_workbench,
         "entered_workbench": workspace,
-        "instruction": _workspace_operator_instruction(workspace, phase_context),
-        "active_phase": phase,
-        "phase_goal": _phase_spec(phase_context).get("goal"),
-        "phase_success_gates": _phase_spec(phase_context).get("success_gates", []),
+        "instruction": _workspace_operator_instruction(workspace),
     }
 
 
-def _workspace_operator_instruction(
-    workspace: str | None,
-    phase_context: dict[str, Any] | None = None,
-) -> str:
+def _workspace_operator_instruction(workspace: str | None) -> str:
     pack = get_tool_pack(workspace)
-    phase_context = phase_context or {}
-    phase = _phase_name(phase_context) if phase_context else "unknown"
-    spec = _phase_spec(phase_context) if phase_context else {}
     base = (
-        "Use this workspace's concrete native tools to make the highest-quality "
-        "CAD increment you can from the user's goal. You own the design choices, "
-        "feature strategy, dimensions, naming, and whether to hand off. Use "
-        "inspection tools as needed, and call core.enter_workspace when another "
-        "workspace is the better next place to work. Stay inside the active "
-        f"VibeCAD phase '{phase}' and validate against its success gates before "
-        "claiming completion."
+        "Execute your design brief with this workspace's concrete native tools. "
+        "Work parametrically by default: start nontrivial parts from a master "
+        "layout sketch on an origin/datum plane carrying the governing "
+        "dimensions, and make downstream sketches reference it instead of "
+        "repeating magic numbers. Match each operation to the surface "
+        "character the function demands (prismatic -> pad/pocket, rotational "
+        "-> revolve, blades/fins/ducts -> loft/sweep along curved paths, "
+        "helical -> helix); never substitute a straight pad for a curved "
+        "functional surface. After each feature, verify the returned shape "
+        "delta against the brief's dimensions and intended surface character "
+        "before building on it. You own the design choices, feature strategy, "
+        "dimensions, and naming; call core.enter_workspace when another "
+        "workspace is the better next place to work."
     )
-    if spec.get("goal"):
-        base = f"{base} Phase goal: {spec['goal']}"
     if pack is None:
         return base
     return f"{base} Workspace guidance: {pack.instructions}"
-
-
-def _phase_name(phase_context: dict[str, Any] | None) -> str:
-    try:
-        return normalize_phase(
-            str((phase_context or {}).get("active_phase") or "intent")
-        )
-    except Exception:
-        return "intent"
-
-
-def _phase_spec(phase_context: dict[str, Any] | None) -> dict[str, Any]:
-    phase = _phase_name(phase_context)
-    return dict(PHASE_SPECS.get(phase, PHASE_SPECS["intent"]))
-
-
-def _phase_allowed_workbenches(phase_context: dict[str, Any] | None) -> set[str]:
-    phase = (phase_context or {}).get("phase")
-    if isinstance(phase, dict) and isinstance(phase.get("allowed_workbenches"), list):
-        return {str(item) for item in phase["allowed_workbenches"]}
-    return {str(item) for item in _phase_spec(phase_context).get("allowed_workbenches", ())}
-
-
-def _phase_allows_workbench(
-    phase_context: dict[str, Any] | None,
-    workbench: str | None,
-) -> bool:
-    if not workbench:
-        return True
-    allowed = _phase_allowed_workbenches(phase_context)
-    return not allowed or workbench in allowed
-
-
-def _phase_intent_is_approved(phase_context: dict[str, Any] | None) -> bool:
-    intent = (phase_context or {}).get("intent", {})
-    if not isinstance(intent, dict):
-        return False
-    if intent.get("approved"):
-        return True
-    brief = intent.get("brief")
-    if isinstance(brief, dict):
-        if brief.get("ready_for_next_phase"):
-            return True
-        requirements = brief.get("requirements")
-        summary = str(brief.get("summary") or "").strip()
-        if summary and isinstance(requirements, dict) and requirements:
-            return True
-    readiness = intent.get("readiness")
-    return bool(
-        isinstance(readiness, dict)
-        and readiness.get("ready_for_next_phase")
-        and int(readiness.get("score", 0) or 0) >= 80
-    )
-
-
-def _phase_requires_approved_intent(phase_context: dict[str, Any] | None) -> bool:
-    return bool(_phase_spec(phase_context).get("requires_approved_intent"))
-
-
-def _request_policy(prompt: str, context: dict[str, Any]) -> dict[str, Any]:
-    text = f" {str(prompt or '').lower()} "
-    document = context.get("document", {}) if isinstance(context, dict) else {}
-    try:
-        object_count = int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
-    except Exception:
-        object_count = 0
-    explicit_new = any(
-        phrase in text
-        for phrase in (
-            " create a new ",
-            " make a new ",
-            " new design ",
-            " new part ",
-            " new assembly ",
-            " from scratch ",
-            " start over ",
-            " rebuild ",
-            " replace ",
-            " replacement ",
-        )
-    )
-    modify_existing = any(
-        phrase in text
-        for phrase in (
-            " this model ",
-            " this part ",
-            " this body ",
-            " this frame ",
-            " current model ",
-            " existing model ",
-            " existing part ",
-            " selected ",
-            " fix ",
-            " correct ",
-            " improve ",
-            " optimize ",
-            " optimise ",
-            " modify ",
-            " adjust ",
-            " change ",
-            " repair ",
-            " update ",
-            " add to ",
-        )
-    )
-    mode = "new_design" if explicit_new and not modify_existing else "create_or_modify"
-    preserve_existing = bool(object_count > 0 and modify_existing and not explicit_new)
-    if preserve_existing:
-        mode = "modify_existing"
-    return {
-        "mode": mode,
-        "preserve_existing_model": preserve_existing,
-        "document_object_count_at_start": object_count,
-        "explicit_new_design": explicit_new,
-        "modify_existing_language": modify_existing,
-        "instruction": (
-            "Preserve the existing active/selected model. Inspect and modify "
-            "current objects/features in place; do not create a replacement "
-            "document, replacement body, or fresh design unless the user "
-            "explicitly asks for replacement or a rebuild."
-            if preserve_existing
-            else "No existing-model preservation constraint was inferred from the prompt."
-        ),
-    }
-
-
-def _request_policy_hidden_tools(request_policy: dict[str, Any] | None) -> set[str]:
-    if not isinstance(request_policy, dict) or not request_policy.get("preserve_existing_model"):
-        return set()
-    return set(DOCUMENT_MANAGEMENT_TOOLS) | set(PROVIDER_REPLACEMENT_ENTRYPOINT_TOOLS)
-
-
-def _apply_request_policy_provider_surface(
-    service: VibeCADService,
-    context: dict[str, Any],
-    request_policy: dict[str, Any] | None,
-) -> None:
-    hidden = _request_policy_hidden_tools(request_policy)
-    if not hidden:
-        return
-
-    def filter_schemas(value: Any) -> tuple[list[dict[str, Any]], set[str]]:
-        if not isinstance(value, list):
-            return [], set()
-        kept: list[dict[str, Any]] = []
-        removed: set[str] = set()
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "")
-            if name in hidden:
-                removed.add(name)
-                continue
-            kept.append(item)
-        return kept, removed
-
-    filtered_schemas, removed_from_context = filter_schemas(context.get("provider_tool_schemas"))
-    if isinstance(context.get("provider_tool_schemas"), list):
-        context["provider_tool_schemas"] = filtered_schemas
-
-    surface = context.get("provider_tool_surface")
-    removed_from_surface: set[str] = set()
-    if isinstance(surface, dict):
-        surface_tools, removed_from_surface = filter_schemas(surface.get("tools"))
-        surface["tools"] = surface_tools
-        surface["tool_count"] = len(surface_tools)
-
-    removed = sorted(removed_from_context | removed_from_surface)
-    if not removed:
-        return
-
-    request_policy["hidden_provider_tools"] = removed
-    request_policy["hidden_provider_tool_policy"] = (
-        "The user request refers to the existing model, so replacement-body, "
-        "new primitive, destructive delete, and document lifecycle tools are "
-        "hidden from this model-visible tool surface."
-    )
-
-    def update_scope(scope: Any) -> None:
-        if not isinstance(scope, dict):
-            return
-        names = [
-            str(name)
-            for name in scope.get("active_tool_names", [])
-            if str(name) not in hidden
-        ]
-        scope["active_tool_names"] = names
-        scope["active_tool_count"] = len(names)
-        try:
-            omitted = int(scope.get("omitted_tool_count", 0) or 0)
-        except Exception:
-            omitted = 0
-        scope["omitted_tool_count"] = omitted + len(removed)
-        scope["request_filter"] = {
-            "preserve_existing_model": True,
-            "hidden_tool_names": removed,
-        }
-
-    update_scope(context.get("provider_tool_scope"))
-    if isinstance(surface, dict):
-        update_scope(surface.get("scope"))
 
 
 def _workspace_session_from_trace(
@@ -1783,294 +918,31 @@ def _effective_provider_workbench(
     return active_workbench
 
 
-def _active_sketch_is_partdesign_body_member(service: VibeCADService) -> bool:
-    try:
-        sketcher = service.sketcher_summary()
-        partdesign = service.partdesign_summary()
-    except Exception:
-        return False
-    if not isinstance(sketcher, dict) or not sketcher.get("found"):
-        return False
-    sketch = sketcher.get("sketch")
-    if not isinstance(sketch, dict):
-        return False
-    sketch_name = str(sketch.get("name") or "")
-    sketch_label = str(sketch.get("label") or "")
-    if not sketch_name and not sketch_label:
-        return False
-    bodies = partdesign.get("bodies", []) if isinstance(partdesign, dict) else []
-    if not isinstance(bodies, list):
-        return False
-    for body in bodies:
-        if not isinstance(body, dict):
-            continue
-        for feature in body.get("features", []) or []:
-            if not isinstance(feature, dict):
-                continue
-            if sketch_name and feature.get("name") == sketch_name:
-                return True
-            if sketch_label and feature.get("label") == sketch_label:
-                return True
-    return False
-
-
-def _apply_effective_provider_workbench(
-    service: VibeCADService,
-    context: dict[str, Any],
-    active_workbench: str | None,
-    provider_workbench: str | None,
-) -> None:
-    scope = provider_tool_scope_for_context(service, provider_workbench)
-    schemas = provider_safe_tool_schemas(
-        service,
-        provider_workbench,
-        tool_names=scope.tool_names,
-    )
-    full_schemas = provider_safe_tool_schemas(service, provider_workbench)
-    context["active_workbench"] = active_workbench
-    context["workbench"] = provider_workbench
-    context["provider_tool_schemas"] = schemas
-    context["provider_tool_schemas_workbench"] = provider_workbench
-    context["provider_tool_scope"] = {
-        "workbench": scope.workbench,
-        "phase": scope.phase,
-        "reason": scope.reason,
-        "active_tool_count": len(schemas),
-        "full_workbench_tool_count": len(full_schemas),
-        "omitted_tool_count": max(0, len(full_schemas) - len(schemas)),
-        "active_tool_names": [schema["name"] for schema in schemas],
-    }
-    context["provider_tool_surface"] = _provider_tool_surface_from_schemas(
-        service,
-        provider_workbench,
-        schemas,
-        full_tool_count=len(full_schemas),
-        scope=context["provider_tool_scope"],
-    )
-    context["tool_shape_report"] = service.tool_shape_report(provider_workbench)
-    if provider_workbench == "PartDesignWorkbench":
-        context.update(
-            {
-                "partdesign": service.partdesign_summary(),
-                "sketcher": service.sketcher_summary(),
-                "material": service.material_summary(),
-                "assembly": service.assembly_summary(),
-            }
-        )
-
-
 def provider_tool_scope_for_context(
     service: VibeCADService,
     workbench: str | None,
 ) -> ProviderToolScope:
-    if workbench == "SketcherWorkbench":
-        return _sketcher_tool_scope_for_context(service, workbench)
-    if workbench == "PartDesignWorkbench":
-        return _partdesign_tool_scope_for_context(service, workbench)
-    return ProviderToolScope(
-        workbench=workbench,
-        phase="workbench_default",
-        reason="Use the full scoped tool surface for this workbench until phase routing is implemented.",
-        tool_names=None,
-    )
-
-
-def _sketcher_tool_scope_for_context(
-    service: VibeCADService,
-    workbench: str | None,
-) -> ProviderToolScope:
-    try:
-        sketcher = service.sketcher_summary()
-    except Exception:
-        sketcher = {}
-    if not isinstance(sketcher, dict) or not sketcher.get("found"):
+    """Pack-based tool scope: shared core tools plus the workbench pack tools."""
+    pack = get_tool_pack(workbench)
+    if pack is None:
         return ProviderToolScope(
             workbench=workbench,
-            phase="sketcher_no_active_sketch",
-            reason="No active sketch is available; expose sketch creation/opening plus inspection tools.",
-            tool_names=PROVIDER_CONTEXT_CORE_TOOLS
-            | {
-                "sketcher.get_sketch",
-                "sketcher.create_sketch",
-                "sketcher.open_sketch",
-                "sketcher.list_reference_geometry",
-                "sketcher.list_external_geometry",
-            },
-        )
-    geometry_count = int(sketcher.get("geometry_count", 0) or 0)
-    solver = sketcher.get("solver_status", {}) if isinstance(sketcher, dict) else {}
-    degrees_of_freedom = None
-    if isinstance(solver, dict):
-        try:
-            degrees_of_freedom = int(solver.get("degrees_of_freedom"))
-        except Exception:
-            degrees_of_freedom = None
-    if geometry_count <= 0:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="sketcher_geometry_authoring",
-            reason="A sketch exists but has no geometry; expose primitive/profile creation and sketch inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CREATE_TOOLS
-            | {
-                "sketcher.list_reference_geometry",
-                "sketcher.list_external_geometry",
-                "sketcher.add_external_geometry",
-                "sketcher.remove_external_geometry",
-            },
-        )
-    profile = sketcher.get("profile_status", {}) if isinstance(sketcher, dict) else {}
-    closed_profile = bool(profile.get("closed_profile")) if isinstance(profile, dict) else False
-    if not closed_profile:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="sketcher_profile_authoring",
-            reason="A sketch has geometry but no closed profile; expose geometry continuation, profile repair, closure constraints, and inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CREATE_TOOLS
-            | SKETCHER_REPAIR_TOOLS
-            | SKETCHER_LOCAL_EDIT_TOOLS
-            | SKETCHER_PROFILE_CLOSURE_CONSTRAINT_TOOLS,
-        )
-    if degrees_of_freedom is None or degrees_of_freedom > 0:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="sketcher_constraint_solving",
-            reason="A sketch has geometry and remaining degrees of freedom; expose constraints, minimal geometry continuation, local corrections, and inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CONSTRAINT_TOOLS
-            | SKETCHER_LOCAL_EDIT_TOOLS
+            stage="core_tools",
+            reason=(
+                "No workbench tool pack is registered for this workspace; "
+                "expose the shared core tools only."
+            ),
+            tool_names=set(CORE_PROVIDER_TOOLS),
         )
     return ProviderToolScope(
         workbench=workbench,
-        phase="sketcher_feature_or_revision",
-        reason="The active sketch is fully constrained; expose validation, revision tools, and downstream feature tools.",
-        tool_names=PROVIDER_CONTEXT_CORE_TOOLS
-        | SKETCHER_INSPECT_TOOLS
-        | SKETCHER_EDIT_TOOLS
-        | SKETCHER_CONSTRAINT_TOOLS,
+        stage="workbench_pack",
+        reason=(
+            f"Expose the shared core tools plus the {pack.workbench} "
+            "tool pack. Switching workspaces swaps the pack."
+        ),
+        tool_names=set(CORE_PROVIDER_TOOLS) | set(pack.tool_names),
     )
-
-
-def _partdesign_tool_scope_for_context(
-    service: VibeCADService,
-    workbench: str | None,
-) -> ProviderToolScope:
-    try:
-        partdesign = service.partdesign_summary()
-    except Exception:
-        partdesign = {}
-    try:
-        sketcher = service.sketcher_summary()
-    except Exception:
-        sketcher = {}
-    bodies = partdesign.get("bodies", []) if isinstance(partdesign, dict) else []
-    body_count = len(bodies) if isinstance(bodies, list) else 0
-    sketch_found = bool(isinstance(sketcher, dict) and sketcher.get("found"))
-    geometry_count = int(sketcher.get("geometry_count", 0) or 0) if isinstance(sketcher, dict) else 0
-    profile = sketcher.get("profile_status", {}) if isinstance(sketcher, dict) else {}
-    ready_for_feature = bool(
-        isinstance(profile, dict)
-        and (profile.get("ready_for_pad") or profile.get("ready_for_pocket"))
-    )
-    closed_profile = bool(profile.get("closed_profile")) if isinstance(profile, dict) else False
-    degrees_of_freedom = None
-    if isinstance(profile, dict):
-        try:
-            degrees_of_freedom = int(profile.get("degrees_of_freedom"))
-        except Exception:
-            degrees_of_freedom = None
-    has_native_feature = _partdesign_has_native_feature(bodies)
-    if body_count <= 0:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="partdesign_setup",
-            reason="No PartDesign body exists; expose body/sketch setup and document inspection.",
-            tool_names=PROVIDER_CONTEXT_CORE_TOOLS | PARTDESIGN_SETUP_TOOLS,
-        )
-    if not sketch_found or geometry_count <= 0:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="partdesign_sketch_authoring",
-            reason="A PartDesign body exists but no active populated sketch exists; expose sketch creation and geometry authoring.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | PARTDESIGN_SETUP_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CREATE_TOOLS,
-        )
-    if not closed_profile:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="partdesign_profile_authoring",
-            reason="A PartDesign sketch has geometry but no closed profile; expose profile creation, repair, closure constraints, and inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | PARTDESIGN_SETUP_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CREATE_TOOLS
-            | SKETCHER_REPAIR_TOOLS
-            | SKETCHER_LOCAL_EDIT_TOOLS
-            | SKETCHER_PROFILE_CLOSURE_CONSTRAINT_TOOLS,
-        )
-    if not ready_for_feature or (degrees_of_freedom is not None and degrees_of_freedom > 0):
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="partdesign_constraint_solving",
-            reason="A PartDesign sketch has a closed profile that is not feature-ready; expose constraints, local corrections, and inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | PARTDESIGN_SETUP_TOOLS
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | SKETCHER_CONSTRAINT_TOOLS
-            | SKETCHER_LOCAL_EDIT_TOOLS,
-        )
-    if not has_native_feature:
-        return ProviderToolScope(
-            workbench=workbench,
-            phase="partdesign_base_feature_creation",
-            reason="A PartDesign sketch is feature-ready and the body has no native solid feature yet; expose native feature creation and inspection.",
-            tool_names=PROVIDER_CONTEXT_READ_TOOLS
-            | {"partdesign.get_bodies", "partdesign.create_sketch"}
-            | SKETCHER_STATUS_INSPECT_TOOLS
-            | PARTDESIGN_BASE_FEATURE_TOOLS,
-        )
-    return ProviderToolScope(
-        workbench=workbench,
-        phase="partdesign_feature_and_revision",
-        reason="A PartDesign body already has native features; expose feature revision, additional feature creation, sketch setup, and inspection.",
-        tool_names=PROVIDER_CONTEXT_READ_TOOLS
-        | PARTDESIGN_SETUP_TOOLS
-        | PARTDESIGN_BASE_FEATURE_TOOLS
-        | PARTDESIGN_FEATURE_REVISION_TOOLS
-        | PARTDESIGN_ADVANCED_PROFILE_TOOLS
-        | SKETCHER_STATUS_INSPECT_TOOLS,
-    )
-
-
-def _partdesign_has_native_feature(bodies: Any) -> bool:
-    if not isinstance(bodies, list):
-        return False
-    ignored_types = {
-        "PartDesign::Body",
-        "App::Origin",
-        "PartDesign::Origin",
-        "PartDesign::CoordinateSystem",
-        "PartDesign::Plane",
-        "PartDesign::Line",
-        "PartDesign::Point",
-        "Sketcher::SketchObject",
-    }
-    for body in bodies:
-        if not isinstance(body, dict):
-            continue
-        for feature in body.get("features", []) or []:
-            if not isinstance(feature, dict):
-                continue
-            feature_type = str(feature.get("type") or "")
-            if feature_type.startswith("PartDesign::") and feature_type not in ignored_types:
-                return True
-    return False
 
 
 def _provider_tool_surface_from_schemas(
@@ -2084,7 +956,9 @@ def _provider_tool_surface_from_schemas(
         "active_workbench": workbench,
         "tool_pack_enabled": service.is_workbench_tool_pack_enabled(workbench),
         "tool_count": len(schemas),
-        "full_workbench_tool_count": full_tool_count if full_tool_count is not None else len(schemas),
+        "full_workbench_tool_count": full_tool_count
+        if full_tool_count is not None
+        else len(schemas),
         "scope": scope or {},
         "tools": schemas,
     }
@@ -2100,9 +974,9 @@ def _provider_loop_state(
 ) -> dict[str, Any]:
     validation_notes = _missing_requirement_lines(prompt, context, tool_trace)
     remaining: list[str] = list(validation_notes)
-    workspace_state = context.get("vibecad_workspace", {}) if isinstance(context, dict) else {}
-    project_state = context.get("vibecad_project") if isinstance(context, dict) else None
-    phase = _phase_name(project_state) if isinstance(project_state, dict) else "unknown"
+    workspace_state = (
+        context.get("vibecad_workspace", {}) if isinstance(context, dict) else {}
+    )
     workspace_mode = (
         str(workspace_state.get("mode") or "")
         if isinstance(workspace_state, dict)
@@ -2119,9 +993,13 @@ def _provider_loop_state(
         if isinstance(item, dict)
     ]
     document = context.get("document", {}) if isinstance(context, dict) else {}
-    object_count = int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
+    object_count = (
+        int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
+    )
     screenshot = context.get("view_screenshot", {}) if isinstance(context, dict) else {}
-    observation = screenshot.get("visual_observation") if isinstance(screenshot, dict) else None
+    observation = (
+        screenshot.get("visual_observation") if isinstance(screenshot, dict) else None
+    )
     attention_flags = (
         list(observation.get("attention_flags") or [])
         if isinstance(observation, dict)
@@ -2130,8 +1008,6 @@ def _provider_loop_state(
     return {
         "turn": max(1, int(turn)),
         "mode": "autonomous_cad_operator",
-        "active_phase": phase,
-        "phase_validation": _phase_validation_from_context(context),
         "workspace_mode": workspace_mode,
         "execution_contract": _execution_contract_for_context(context),
         "max_mutating_tool_calls_per_turn": _max_mutating_tool_calls_per_provider_turn(),
@@ -2147,12 +1023,16 @@ def _provider_loop_state(
         "document_delta": _document_delta(previous_context, context),
         "document_object_count": object_count,
         "visual_feedback_consumed": bool(visual_feedback_consumed),
-        "screenshot_captured": bool(isinstance(screenshot, dict) and screenshot.get("captured")),
+        "screenshot_captured": bool(
+            isinstance(screenshot, dict) and screenshot.get("captured")
+        ),
         "visual_attention_flags": attention_flags,
         "instruction": (
-            "Use the current workspace mode. In planner mode, choose a workspace "
-            "with core.enter_workspace. In workspace mode, use the exposed native "
-            "tools to make the best CAD increment you can. state_validation_notes "
+            "Use the current workspace mode. In planner mode, state or restate "
+            "the design brief and choose a workspace with core.enter_workspace. "
+            "In workspace mode, advance the brief's feature plan with the "
+            "exposed native tools, verifying each shape delta against the "
+            "brief's dimensions and surface character. state_validation_notes "
             "are observations, not deterministic instructions. The parent loop "
             "will checkpoint after bounded mutations or workspace handoffs."
         ),
@@ -2162,21 +1042,16 @@ def _provider_loop_state(
 def _execution_contract_for_context(context: dict[str, Any]) -> dict[str, Any]:
     workbench = context.get("workbench") if isinstance(context, dict) else None
     scope = context.get("provider_tool_scope", {}) if isinstance(context, dict) else {}
-    project = context.get("vibecad_project") if isinstance(context, dict) else None
-    has_project = isinstance(project, dict)
-    phase = _phase_name(project) if has_project else "unknown"
-    phase_spec = _phase_spec(project) if has_project else {}
-    phase_validation = _phase_validation_from_context(context)
     contract = WORKBENCH_EXECUTION_CONTRACTS.get(str(workbench or ""))
     if contract is None:
         return {
             "mode": "generic_native_freecad",
-            "active_phase": phase,
-            "phase_goal": phase_spec.get("goal"),
-            "phase_success_gates": list(phase_spec.get("success_gates", [])),
-            "phase_validation_ok": phase_validation.get("ok"),
-            "active_tool_phase": scope.get("phase") if isinstance(scope, dict) else None,
-            "active_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
+            "active_tool_stage": scope.get("stage")
+            if isinstance(scope, dict)
+            else None,
+            "active_tool_count": scope.get("active_tool_count")
+            if isinstance(scope, dict)
+            else None,
             "required_order": [
                 "inspect active document/workbench state",
                 "use only direct native function tools exposed for the current provider turn",
@@ -2187,28 +1062,26 @@ def _execution_contract_for_context(context: dict[str, Any]) -> dict[str, Any]:
                 "do not report completion from prose alone",
                 "requested geometry must exist in the FreeCAD document",
             ],
-            "preferred_tools": [],
         }
     return {
         "workbench": workbench,
         "mode": contract["mode"],
-        "active_phase": phase,
-        "phase_goal": phase_spec.get("goal"),
-        "phase_success_gates": list(phase_spec.get("success_gates", [])),
-        "phase_validation_ok": phase_validation.get("ok"),
-        "active_tool_phase": scope.get("phase") if isinstance(scope, dict) else None,
-        "active_tool_scope_reason": scope.get("reason") if isinstance(scope, dict) else None,
-        "active_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
-        "full_workbench_tool_count": scope.get("full_workbench_tool_count") if isinstance(scope, dict) else None,
+        "active_tool_stage": scope.get("stage") if isinstance(scope, dict) else None,
+        "active_tool_scope_reason": scope.get("reason")
+        if isinstance(scope, dict)
+        else None,
+        "active_tool_count": scope.get("active_tool_count")
+        if isinstance(scope, dict)
+        else None,
+        "full_workbench_tool_count": scope.get("full_workbench_tool_count")
+        if isinstance(scope, dict)
+        else None,
         "required_order": list(contract["required_order"]),
         "completion_gates": list(contract["completion_gates"]),
-        "available_tool_count": scope.get("active_tool_count") if isinstance(scope, dict) else None,
+        "available_tool_count": scope.get("active_tool_count")
+        if isinstance(scope, dict)
+        else None,
     }
-
-
-def _phase_validation_from_context(context: dict[str, Any]) -> dict[str, Any]:
-    validation = context.get("phase_validation") if isinstance(context, dict) else None
-    return validation if isinstance(validation, dict) else {}
 
 
 def _next_loop_step(
@@ -2217,8 +1090,6 @@ def _next_loop_step(
     has_recent_trace: bool,
     workspace_mode: str = "",
 ) -> str:
-    if workspace_mode == "intent":
-        return "Update the intent brief or ask targeted questions; do not create geometry."
     if workspace_mode == "planner":
         return "Inspect if useful, then explicitly enter the best workspace for the next CAD operation."
     if workspace_mode == "workspace":
@@ -2250,7 +1121,14 @@ def _document_delta(
         after = current_objects[key]
         changed_fields = [
             field
-            for field in ("label", "type", "placement", "bound_box", "shape", "material")
+            for field in (
+                "label",
+                "type",
+                "placement",
+                "bound_box",
+                "shape",
+                "material",
+            )
             if before.get(field) != after.get(field)
         ]
         if changed_fields:
@@ -2345,7 +1223,7 @@ def _format_document_delta(delta: Any) -> str:
 
 
 def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
-    phase_preamble = _phase_prompt_preamble(context)
+    session_preamble = _session_prompt_preamble(context)
     conversation_context = context.get("conversation", {})
     conversation = (
         conversation_context.get("conversation", [])
@@ -2353,7 +1231,7 @@ def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
         else []
     )
     if not conversation:
-        return f"{phase_preamble}\n\nCurrent user request: {prompt}".strip()
+        return f"{session_preamble}\n\nCurrent user request: {prompt}".strip()
     scope = (
         conversation_context.get("scope", {})
         if isinstance(conversation_context, dict)
@@ -2380,42 +1258,69 @@ def _prompt_with_conversation(prompt: str, context: dict[str, Any]) -> str:
         content = str(item.get("content", "")).strip()
         if content:
             lines.append(f"{role}: {content}")
-    lines = [phase_preamble, "", *lines]
+    lines = [session_preamble, "", *lines]
     lines.extend(["", f"Current user request: {prompt}"])
     return "\n".join(lines)
 
 
-def _phase_prompt_preamble(context: dict[str, Any]) -> str:
-    project = context.get("vibecad_project", {})
+def _session_prompt_preamble(context: dict[str, Any]) -> str:
     workspace = context.get("vibecad_workspace", {})
-    request = context.get("vibecad_request", {})
-    phase = str(project.get("active_phase") or "intent") if isinstance(project, dict) else "intent"
-    phase_info = project.get("phase", {}) if isinstance(project, dict) else {}
-    intent = project.get("intent", {}) if isinstance(project, dict) else {}
-    readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
-    allowed = phase_info.get("allowed_workbenches", []) if isinstance(phase_info, dict) else []
     lines = [
-        "VibeCAD project phase contract:",
-        f"- active phase: {phase}",
-        f"- phase goal: {phase_info.get('goal') if isinstance(phase_info, dict) else ''}",
-        f"- working intent ready: {_phase_intent_is_approved(context.get('vibecad_project'))}",
-        f"- intent readiness: {readiness.get('score', 0) if isinstance(readiness, dict) else 0}/100",
-        f"- allowed workspaces: {', '.join(str(item) for item in allowed) if allowed else 'none in this phase'}",
+        "VibeCAD session contract:",
         f"- workspace mode: {workspace.get('mode') if isinstance(workspace, dict) else 'unknown'}",
-        f"- request mode: {request.get('mode') if isinstance(request, dict) else 'unknown'}",
+        "- design contract: state a design brief (function, reference dimensions "
+        "with assumptions, envelope, ordered feature plan) before mutating "
+        "geometry on a new design; model parametrically from a master layout "
+        "sketch; verify each feature's shape delta against the brief before "
+        "building on it.",
     ]
-    if isinstance(request, dict) and request.get("preserve_existing_model"):
-        lines.append(
-            "- hard rule: preserve the existing model; inspect/modify the current target in place and do not create a replacement body/document."
-        )
-    if phase == "intent":
-        lines.append("- hard rule: do not create CAD geometry in Intent; create/update the intent brief instead.")
-    elif isinstance(intent, dict) and not _phase_intent_is_approved(context.get("vibecad_project")):
-        lines.append("- hard rule: capture a usable working intent brief before downstream CAD authoring.")
     steering = context.get("human_steering", {})
     if isinstance(steering, dict) and steering.get("active_messages"):
-        lines.append("- live steering: " + " | ".join(str(item) for item in steering["active_messages"][-4:]))
+        lines.append(
+            "- live steering: "
+            + " | ".join(str(item) for item in steering["active_messages"][-4:])
+        )
+    reference_lines = _reference_image_lines(context)
+    if reference_lines:
+        lines.extend(
+            [
+                "- reference images: the user attached "
+                + (
+                    f"{len(reference_lines)} reference image"
+                    + ("s" if len(reference_lines) != 1 else "")
+                )
+                + " showing the TARGET design (labeled REFERENCE in the "
+                "message images); they are not current document geometry. "
+                "Extract topology and proportions from them, but never invent "
+                "dimensions: anchor scale from any user-stated dimension or a "
+                "visible standard feature (bolt hole, fastener, rail, coin), "
+                "state every dimensional assumption explicitly in the design "
+                "brief, and if scale is genuinely ambiguous ask the user for "
+                "one anchor dimension instead of guessing. Compare each "
+                "CURRENT VIEWPORT screenshot against the reference images and "
+                "correct drift before adding features.",
+                *reference_lines,
+            ]
+        )
     return "\n".join(lines)
+
+
+def _reference_image_lines(context: dict[str, Any]) -> list[str]:
+    references = context.get("reference_images", {})
+    if not isinstance(references, dict):
+        return []
+    images = references.get("images", [])
+    if not isinstance(images, list) or not images:
+        return []
+    lines = []
+    for index, entry in enumerate(images, start=1):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("id") or f"image {index}")
+        label = str(entry.get("label") or "").strip()
+        suffix = f" — {label}" if label else ""
+        lines.append(f"  - reference {index}: {name}{suffix}")
+    return lines
 
 
 def _continuation_prompt(
@@ -2444,10 +1349,14 @@ def _continuation_prompt(
             if result.get("required_next_action"):
                 details.append(
                     "required_next_action="
-                    + _trace_text(json.dumps(result.get("required_next_action"), default=str), 360)
+                    + _trace_text(
+                        json.dumps(result.get("required_next_action"), default=str), 360
+                    )
                 )
             elif result.get("next_action"):
-                details.append(f"next_action={_trace_text(result.get('next_action'), 240)}")
+                details.append(
+                    f"next_action={_trace_text(result.get('next_action'), 240)}"
+                )
         suffix = f" ({'; '.join(details)})" if details else ""
         trace_lines.append(
             f"- {item.get('tool_name')}: {'ok' if item.get('ok') else 'failed'}{suffix}"
@@ -2472,7 +1381,6 @@ def _continuation_prompt(
             if str(item).strip()
         ]
     loop_lines = []
-    request = context.get("vibecad_request", {})
     if isinstance(loop_state, dict):
         delta = loop_state.get("document_delta")
         contract = loop_state.get("execution_contract")
@@ -2501,14 +1409,11 @@ def _continuation_prompt(
                     "- completion gates: "
                     + "; ".join(str(item) for item in completion_gates)
                 )
-    if isinstance(request, dict):
-        loop_lines.append(f"- request mode: {request.get('mode')}")
-        if request.get("preserve_existing_model"):
-            loop_lines.append(
-                "- preserve existing model: modify active/selected geometry in place; do not create replacement body/document"
-            )
+    reference_lines = _reference_image_lines(context)
     screenshot = context.get("view_screenshot", {})
-    visual = screenshot.get("visual_observation", {}) if isinstance(screenshot, dict) else {}
+    visual = (
+        screenshot.get("visual_observation", {}) if isinstance(screenshot, dict) else {}
+    )
     visual_lines = []
     if isinstance(visual, dict) and visual.get("available"):
         visual_lines.extend(
@@ -2526,14 +1431,20 @@ def _continuation_prompt(
             ]
         )
     elif isinstance(screenshot, dict) and screenshot.get("captured"):
-        visual_lines.append("- screenshot captured, but no provider-readable visual observation is available")
+        visual_lines.append(
+            "- screenshot captured, but no provider-readable visual observation is available"
+        )
     return "\n".join(
         [
-            "Continue the same VibeCAD CAD job. Do not ask follow-up questions, "
-            "do not stop at a plan, and do not report that work will happen later. "
-            "Use best judgement, switch workbenches if needed, and create or modify "
-            "real FreeCAD document objects with the direct function tools exposed "
-            "to this provider turn.",
+            "Continue the same VibeCAD CAD job. First re-anchor to the design "
+            "brief: compare the most recent shape delta against the brief's "
+            "dimensions and intended surface character. If the last feature "
+            "drifted (wrong size, wrong plane, or a straight pad where the "
+            "brief calls for a curved loft/sweep surface), correct it before "
+            "adding anything on top of it. Do not ask follow-up questions, do "
+            "not stop at a plan, and do not report that work will happen later. "
+            "Create or modify real FreeCAD document objects with the direct "
+            "function tools exposed to this provider turn.",
             "",
             f"Original user request: {prompt}",
             "",
@@ -2551,6 +1462,17 @@ def _continuation_prompt(
             "",
             "Current viewport visual observation:",
             "\n".join(visual_lines) or "- no screenshot observation yet",
+            *(
+                [
+                    "",
+                    f"Attached user reference images ({len(reference_lines)}) — "
+                    "the TARGET design, not current geometry; keep comparing "
+                    "the viewport against them:",
+                    "\n".join(reference_lines),
+                ]
+                if reference_lines
+                else []
+            ),
             "",
             "Remaining state-based outcomes:",
             "\n".join(missing_lines) or "- none detected from current FreeCAD state",
@@ -2561,8 +1483,10 @@ def _continuation_prompt(
             "Live user steering messages:",
             "\n".join(steering_lines) or "- none",
             "",
-            "Continue now. If a tool failed, choose a different function tool or "
-            "recover using the current document state.",
+            "Proceed with the next feature in the brief's plan. Tool errors are "
+            "secondary to design correctness: recover from failures using the "
+            "current document state, but never let a retry replace a curved "
+            "functional surface with a simpler wrong shape.",
         ]
     )
 
@@ -2580,16 +1504,8 @@ def _should_continue_autonomously(
         and turn_index >= MAX_AUTONOMOUS_PROVIDER_TURNS - 1
     ):
         return False
-    output_text = output.lower()
-    if _assistant_reported_checkpoint(output_text):
-        return True
     if _tool_batch_checkpoint_reached(tool_trace):
         return True
-    try:
-        if normalize_phase(service.phase_context().get("active_phase")) == "intent":
-            return False
-    except Exception:
-        pass
     try:
         current_context = service.provider_context_summary()
         missing = _missing_requirement_lines(prompt, current_context, tool_trace)
@@ -2606,48 +1522,9 @@ def _should_continue_autonomously(
     doc_count = int(service.document_summary().get("object_count", 0) or 0)
     if doc_count > 0 and _provider_attempted_write(tool_trace):
         return False
-    if _assistant_stopped_without_finishing(output_text):
-        return True
-    if _assistant_asked_questions(output_text) and _provider_attempted_write(tool_trace):
-        return True
     if doc_count == 0 and _provider_attempted_write(tool_trace):
         return True
     return False
-
-
-def _verified_document_output(
-    prompt: str,
-    service: VibeCADService,
-    raw_output: str,
-    tool_trace: list[dict[str, Any]],
-    visual_feedback_consumed: bool = False,
-) -> str | None:
-    summary = service.document_summary()
-    object_count = int(summary.get("object_count", 0) or 0)
-    if object_count <= 0:
-        return None
-    raw_text = raw_output.lower()
-    should_replace = (
-        "partial freecad changes" in raw_text
-    ) or (
-        "no geometry was created" in raw_text and object_count > 0
-    )
-    if not should_replace:
-        return None
-    objects = [
-        item
-        for item in summary.get("objects", [])
-        if isinstance(item, dict)
-    ]
-    labels = [
-        str(item.get("label") or item.get("name"))
-        for item in objects[:12]
-        if item.get("label") or item.get("name")
-    ]
-    lead = f"I made partial progress and verified {object_count} FreeCAD document objects were created."
-    if labels:
-        return lead + "\n\nCreated objects:\n" + "\n".join(f"- {label}" for label in labels)
-    return lead
 
 
 def _context_has_satisfied_screenshot(context: dict[str, Any]) -> bool:
@@ -2684,7 +1561,8 @@ def _visual_attention_flags(observation: dict[str, Any]) -> list[str]:
     return [
         str(flag)
         for flag in raw_flags
-        if str(flag) in {
+        if str(flag)
+        in {
             "mostly_blank",
             "tiny_visible_model",
             "off_center_model",
@@ -2749,8 +1627,7 @@ def _partdesign_body_count_from_context(context: dict[str, Any]) -> int:
     return sum(
         1
         for item in objects
-        if isinstance(item, dict)
-        and str(item.get("type", "")) == "PartDesign::Body"
+        if isinstance(item, dict) and str(item.get("type", "")) == "PartDesign::Body"
     )
 
 
@@ -2786,37 +1663,12 @@ def _missing_requirement_lines(
     context: dict[str, Any],
     tool_trace: list[dict[str, Any]],
 ) -> list[str]:
-    lines = []
-    project = context.get("vibecad_project") if isinstance(context, dict) else None
-    has_project = isinstance(project, dict)
-    phase = _phase_name(project) if has_project else "unknown"
-    validation = _phase_validation_from_context(context)
-    if has_project and phase == "intent":
-        intent = project.get("intent", {}) if isinstance(project, dict) else {}
-        readiness = intent.get("readiness", {}) if isinstance(intent, dict) else {}
-        missing_fields = readiness.get("missing_fields", []) if isinstance(readiness, dict) else []
-        if missing_fields:
-            return [
-                "- complete the intent brief before creating geometry; missing fields: "
-                + ", ".join(str(item) for item in missing_fields[:8])
-            ]
-        if not _phase_intent_is_approved(project):
-            return ["- create/update the working intent brief, state assumptions, then continue to the CAD phase if the request is clear enough"]
-    elif (
-        has_project
-        and not _phase_intent_is_approved(project)
-    ):
-        return [
-            "- create/update a usable working intent brief before CAD authoring in "
-            f"the {phase} phase"
-        ]
-    if isinstance(validation, dict) and validation.get("failures"):
-        for failure in validation.get("failures", [])[:4]:
-            if isinstance(failure, dict):
-                lines.append(f"- phase gate not satisfied: {failure.get('name')}")
+    lines: list[str] = []
     objects = context.get("document", {}).get("objects", [])
     document = context.get("document", {})
-    object_count = int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
+    object_count = (
+        int(document.get("object_count", 0) or 0) if isinstance(document, dict) else 0
+    )
     if object_count <= 0:
         object_count = len(objects) if isinstance(objects, list) else 0
     if object_count <= 0 and _provider_attempted_write(tool_trace):
@@ -2843,9 +1695,7 @@ def _missing_requirement_lines(
                 f"- fully constrain {sketch_name}{suffix} before creating dependent features"
             ]
         feature_types = {
-            str(item.get("type", ""))
-            for item in objects
-            if isinstance(item, dict)
+            str(item.get("type", "")) for item in objects if isinstance(item, dict)
         }
         has_partdesign_feature = any(
             item_type.startswith("PartDesign::")
@@ -2876,12 +1726,18 @@ def _missing_requirement_lines(
             )
     visual_lines: list[str] = []
     screenshot = context.get("view_screenshot", {})
-    observation = screenshot.get("visual_observation") if isinstance(screenshot, dict) else None
+    observation = (
+        screenshot.get("visual_observation") if isinstance(screenshot, dict) else None
+    )
     if isinstance(screenshot, dict) and screenshot.get("captured"):
         if not isinstance(observation, dict) or not observation.get("available"):
-            visual_lines.append("- captured viewport screenshot has no provider-readable visual observation; capture again")
+            visual_lines.append(
+                "- captured viewport screenshot has no provider-readable visual observation; capture again"
+            )
         elif observation.get("mostly_blank"):
-            visual_lines.append("- viewport screenshot observation is mostly blank; fit/view the model and capture again")
+            visual_lines.append(
+                "- viewport screenshot observation is mostly blank; fit/view the model and capture again"
+            )
         elif _visual_attention_flags(observation):
             flags = ", ".join(_visual_attention_flags(observation))
             visual_lines.append(
@@ -2894,75 +1750,6 @@ def _missing_requirement_lines(
         )
     lines.extend(visual_lines)
     return lines
-
-
-def _assistant_asked_questions(output_text: str) -> bool:
-    return "?" in output_text or "please confirm" in output_text
-
-
-def _assistant_stopped_without_finishing(output_text: str) -> bool:
-    phrases = (
-        "required next inspection",
-        "next step after refresh",
-        "next step after context refresh",
-        "next step can",
-        "next modeling steps",
-        "next steps",
-        "next i will",
-        "then i will",
-        "will be the",
-        "will include",
-        "started the",
-        "i started",
-        "created:",
-        "to continue",
-        "continue by",
-        "i can design",
-        "i can create",
-        "i'm ready",
-        "once the",
-        "once tools",
-        "once the tool",
-        "could not",
-        "cannot",
-        "can't",
-        "not currently",
-        "not modified",
-        "not actually",
-        "not subtracting",
-        "not cutting",
-        "remained unchanged",
-        "did not change",
-        "didn't change",
-        "ineffective",
-        "attempted pockets",
-        "can be recreated",
-        "no document objects",
-        "no objects were created",
-        "tool bridge",
-        "hit an internal",
-        "before geometry could be generated",
-        "please confirm",
-        "please click",
-        "please select",
-        "i need",
-    )
-    return any(phrase in output_text for phrase in phrases)
-
-
-def _assistant_reported_checkpoint(output_text: str) -> bool:
-    checkpoint_phrases = (
-        "progress checkpoint",
-        "checkpoint progress",
-        "checkpoint after",
-        "requested a checkpoint",
-        "checkpoint before",
-        "checkpoint so the tool context can refresh",
-        "workbench switch requires ending",
-        "hit the vibecad",
-        "vibecad requested",
-    )
-    return any(phrase in output_text for phrase in checkpoint_phrases)
 
 
 def _active_sketch_or_task_requires_more_work(service: VibeCADService) -> bool:
@@ -3007,7 +1794,10 @@ def _needs_screenshot_after_latest_successful_write(
             continue
         if item.get("safety") == SafetyLevel.SAFE_WRITE.value:
             latest_write_index = index
-    return latest_write_index >= 0 and latest_screenshot_terminal_index < latest_write_index
+    return (
+        latest_write_index >= 0
+        and latest_screenshot_terminal_index < latest_write_index
+    )
 
 
 def _screenshot_failure_is_terminal_for_process(item: dict[str, Any]) -> bool:
@@ -3077,131 +1867,23 @@ def _is_geometry_write_tool(tool: Any) -> bool:
     )
 
 
-def _phase_tool_block(
+def _policy_tool_block(
     service: VibeCADService,
     tool: Any,
     live_workbench: str | None,
-    request_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    request_policy = request_policy if isinstance(request_policy, dict) else {}
     if tool.name in DOCUMENT_MANAGEMENT_TOOLS:
         return {
             "ok": False,
             "error": (
                 f"{tool.name} is not available to the autonomous CAD loop. "
-                "Document creation/opening must be an explicit user/UI action or "
-                "a future dedicated document-management phase."
+                "Document creation/opening must be an explicit user/UI action."
             ),
             "recoverable": True,
             "required_next_action": {
                 "why": "Keep the model in the current document unless the user explicitly starts document management.",
             },
         }
-    if request_policy.get("preserve_existing_model"):
-        try:
-            existing_objects = int(service.document_summary().get("object_count", 0) or 0)
-        except Exception:
-            existing_objects = int(request_policy.get("document_object_count_at_start", 0) or 0)
-        if existing_objects > 0:
-            if tool.name == "partdesign.create_body":
-                return {
-                    "ok": False,
-                    "error": (
-                        "partdesign.create_body is blocked because the user request "
-                        "refers to improving/fixing the existing model. Inspect and "
-                        "modify the current active/selected Body instead of creating "
-                        "a replacement Body."
-                    ),
-                    "request_mode": request_policy.get("mode"),
-                    "recoverable": True,
-                    "required_next_action": {
-                        "inspect_first": [
-                            "core.get_active_document",
-                            "core.get_selection",
-                            "partdesign.get_bodies",
-                            "core.get_object_properties",
-                        ],
-                        "why": "Preserve existing model identity unless the user explicitly asks for replacement.",
-                    },
-                }
-            if tool.name in {"core.delete_object", "part.create_primitive"}:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"{tool.name} is blocked because the request refers to "
-                        "the existing model. Modify current geometry/features in "
-                        "place instead of deleting or replacing the model."
-                    ),
-                    "request_mode": request_policy.get("mode"),
-                    "recoverable": True,
-                    "required_next_action": {
-                        "inspect_first": [
-                            "core.get_active_document",
-                            "core.get_selection",
-                            "core.get_object_properties",
-                        ],
-                        "why": "Preserve existing model identity unless the user explicitly asks for replacement or deletion.",
-                    },
-                }
-    phase_context = service.phase_context()
-    phase = _phase_name(phase_context)
-    if tool.name == "intent.update_brief" and phase != "intent":
-        return {
-            "ok": False,
-            "error": "intent.update_brief is only available in the Intent phase.",
-            "active_phase": phase,
-            "recoverable": True,
-            "required_next_action": {
-                "tool": "phase.set_current",
-                "arguments": {"phase": "intent", "reason": "Update the project brief."},
-            },
-        }
-    if _is_geometry_write_tool(tool):
-        if phase == "intent":
-            return {
-                "ok": False,
-                "error": (
-                    "CAD geometry tools are blocked in the Intent phase. "
-                    "Capture/update the working intent brief first."
-                ),
-                "active_phase": phase,
-                "recoverable": True,
-                "required_next_action": {
-                    "tool": "intent.update_brief",
-                    "why": "Intent must be captured before geometry authoring.",
-                },
-            }
-        if _phase_requires_approved_intent(phase_context) and not _phase_intent_is_approved(phase_context):
-            return {
-                "ok": False,
-                "error": (
-                    f"CAD geometry tools are blocked in phase '{phase}' until "
-                    "a usable working intent brief exists."
-                ),
-                "active_phase": phase,
-                "recoverable": True,
-                "required_next_action": {
-                    "tool": "phase.set_current",
-                    "arguments": {"phase": "intent", "reason": "Capture working design intent first."},
-                },
-            }
-        tool_workbench = getattr(tool, "workbench", None) or live_workbench
-        if tool_workbench and not _phase_allows_workbench(phase_context, str(tool_workbench)):
-            return {
-                "ok": False,
-                "error": (
-                    f"{tool.name} belongs to {tool_workbench}, which is outside "
-                    f"the active VibeCAD phase '{phase}'."
-                ),
-                "active_phase": phase,
-                "tool_workbench": tool_workbench,
-                "allowed_workbenches": sorted(_phase_allowed_workbenches(phase_context)),
-                "recoverable": True,
-                "required_next_action": {
-                    "tool": "phase.set_current",
-                    "why": "Change to the workflow phase that owns this operation.",
-                },
-            }
     return None
 
 
@@ -3265,7 +1947,6 @@ def make_provider_tool_runner(
     turn_state: dict[str, Any] | None = None,
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
-    request_policy: dict[str, Any] | None = None,
 ):
     enforce_small_step_checkpoint = turn_state is not None
     active_turn_state = turn_state if turn_state is not None else {}
@@ -3290,7 +1971,9 @@ def make_provider_tool_runner(
             attach_steering: bool = True,
         ) -> dict[str, Any]:
             if attach_steering:
-                _attach_steering_to_tool_result(result, steering_check, progress_callback)
+                _attach_steering_to_tool_result(
+                    result, steering_check, progress_callback
+                )
             _record_tool_trace(tool_trace, trace_entry, result, progress_callback)
             return result
 
@@ -3324,23 +2007,9 @@ def make_provider_tool_runner(
             }
             return _finalize_result(result)
 
-        phase_block = _phase_tool_block(service, tool, live_workbench, request_policy)
-        if phase_block is not None:
-            return _finalize_result(phase_block)
-
-        if _is_primitive_tool_blocked(service, tool.name, live_workbench):
-            result = {
-                "ok": False,
-                "error": (
-                    "Part primitive write tools are only exposed to the AI loop "
-                    "inside PartWorkbench unless primitive shortcuts are explicitly "
-                    f"enabled before calling: {tool_name}"
-                ),
-                "active_workbench": live_workbench,
-                "tool_workbench": tool.workbench,
-                "opt_in_required": "AllowPrimitiveProviderTools",
-            }
-            return _finalize_result(result)
+        policy_block = _policy_tool_block(service, tool, live_workbench)
+        if policy_block is not None:
+            return _finalize_result(policy_block)
 
         try:
             args = json.loads(arguments_json or "{}")
@@ -3351,8 +2020,12 @@ def make_provider_tool_runner(
             result = {"ok": False, "error": "Tool arguments must be a JSON object."}
             return _finalize_result(result)
 
-        if enforce_small_step_checkpoint and active_turn_state.get("workbench_switch_reached"):
-            checkpoint_name = str(active_turn_state.get("deferred_checkpoint") or "workbench_switch")
+        if enforce_small_step_checkpoint and active_turn_state.get(
+            "workbench_switch_reached"
+        ):
+            checkpoint_name = str(
+                active_turn_state.get("deferred_checkpoint") or "workbench_switch"
+            )
             result = {
                 "ok": True,
                 "status": "deferred_checkpoint",
@@ -3387,7 +2060,9 @@ def make_provider_tool_runner(
             return _finalize_result(result)
 
         if not _is_tool_available_in_live_context(service, tool, live_workbench):
-            auto_switched = _try_auto_activate_tool_workbench(service, tool, live_workbench)
+            auto_switched = _try_auto_activate_tool_workbench(
+                service, tool, live_workbench
+            )
             if auto_switched:
                 live_workbench = service.active_workbench_name()
                 current_workbench = live_workbench
@@ -3412,10 +2087,10 @@ def make_provider_tool_runner(
                     "recoverable": True,
                     "required_next_action": (
                         {
-                            "tool": "core.activate_workbench",
+                            "tool": "core.enter_workspace",
                             "arguments": {"name": tool.workbench},
                             "then_retry_tool": tool_name,
-                            "why": "Switch to the workbench that owns this human-equivalent FreeCAD tool.",
+                            "why": "Enter the workspace that owns this human-equivalent FreeCAD tool, then retry.",
                         }
                         if tool.workbench
                         else None
@@ -3424,9 +2099,30 @@ def make_provider_tool_runner(
                 return _finalize_result(result)
 
         if not service.is_tool_enabled_for_provider(tool, live_workbench):
+            script_mode = False
+            try:
+                script_mode = bool(service.build_script_mode_enabled())
+            except Exception:
+                script_mode = False
+            if tool_name == "model.build_from_script" and not script_mode:
+                error_text = (
+                    "model.build_from_script is disabled. Script mode is an "
+                    "opt-in preference; use the structured modeling tools "
+                    "instead."
+                )
+            elif script_mode:
+                error_text = (
+                    f"Structured write tools are disabled in script mode: "
+                    f"{tool_name}. Author geometry through "
+                    "model.build_from_script instead."
+                )
+            else:
+                error_text = (
+                    f"Tool pack is disabled for the active workbench: {tool_name}"
+                )
             result = {
                 "ok": False,
-                "error": f"Tool pack is disabled for the active workbench: {tool_name}",
+                "error": error_text,
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
             }
@@ -3452,7 +2148,10 @@ def make_provider_tool_runner(
                     "finish_current_turn": True,
                     "retry_tool_next_turn": tool_name,
                     "retry_arguments_json": _trace_text(arguments_json or "{}"),
-                    "inspect_first": ["core.get_active_document", "core.capture_view_screenshot"],
+                    "inspect_first": [
+                        "core.get_active_document",
+                        "core.capture_view_screenshot",
+                    ],
                 },
                 "turn": active_turn_state.get("turn"),
                 "mutating_tool_calls": active_turn_state.get("mutating_tool_calls", 0),
@@ -3466,13 +2165,17 @@ def make_provider_tool_runner(
                     "tool_name": tool_name,
                     "active_workbench": live_workbench,
                     "turn": active_turn_state.get("turn"),
-                    "mutating_tool_calls": active_turn_state.get("mutating_tool_calls", 0),
+                    "mutating_tool_calls": active_turn_state.get(
+                        "mutating_tool_calls", 0
+                    ),
                     "limit": _max_mutating_tool_calls_per_provider_turn(),
                 },
             )
             return _finalize_result(result)
 
-        if enforce_small_step_checkpoint and _counts_toward_small_step_checkpoint(tool.name, tool.safety):
+        if enforce_small_step_checkpoint and _counts_toward_small_step_checkpoint(
+            tool.name, tool.safety
+        ):
             active_turn_state["mutating_tool_calls"] = (
                 int(active_turn_state.get("mutating_tool_calls", 0) or 0) + 1
             )
@@ -3492,14 +2195,14 @@ def make_provider_tool_runner(
                 "ok": not (isinstance(payload, dict) and payload.get("ok") is False),
                 "result": payload,
             }
-            if result["ok"] and tool_name in {"core.activate_workbench", "core.enter_workspace"}:
+            if result["ok"] and tool_name in {
+                "core.activate_workbench",
+                "core.enter_workspace",
+            }:
                 requested_workbench = str(args.get("name", "") or "").strip()
-                should_checkpoint = (
-                    bool(requested_workbench)
-                    and (
-                        tool_name == "core.enter_workspace"
-                        or requested_workbench != live_workbench
-                    )
+                should_checkpoint = bool(requested_workbench) and (
+                    tool_name == "core.enter_workspace"
+                    or requested_workbench != live_workbench
                 )
                 if should_checkpoint:
                     checkpoint_name = (
@@ -3548,13 +2251,18 @@ def make_provider_tool_runner(
                 )
                 result["required_next_action"] = {
                     "finish_current_turn": True,
-                    "inspect_first": ["core.get_active_document", "core.capture_view_screenshot"],
+                    "inspect_first": [
+                        "core.get_active_document",
+                        "core.capture_view_screenshot",
+                    ],
                     "why": (
                         "A bounded batch of native FreeCAD mutations completed. "
                         "The parent loop will refresh context and continue if work remains."
                     ),
                 }
-                result["mutating_tool_calls"] = active_turn_state.get("mutating_tool_calls", 0)
+                result["mutating_tool_calls"] = active_turn_state.get(
+                    "mutating_tool_calls", 0
+                )
                 result["limit"] = _max_mutating_tool_calls_per_provider_turn()
                 _emit_progress(
                     progress_callback,
@@ -3563,7 +2271,9 @@ def make_provider_tool_runner(
                         "tool_name": tool_name,
                         "active_workbench": live_workbench,
                         "turn": active_turn_state.get("turn"),
-                        "mutating_tool_calls": active_turn_state.get("mutating_tool_calls", 0),
+                        "mutating_tool_calls": active_turn_state.get(
+                            "mutating_tool_calls", 0
+                        ),
                         "limit": _max_mutating_tool_calls_per_provider_turn(),
                     },
                 )
@@ -3601,7 +2311,9 @@ def _counts_toward_small_step_checkpoint(tool_name: str, safety: SafetyLevel) ->
     }
 
 
-def _provider_time_exceeded(started_at: float, max_provider_seconds: float | None) -> bool:
+def _provider_time_exceeded(
+    started_at: float, max_provider_seconds: float | None
+) -> bool:
     return (
         max_provider_seconds is not None
         and max_provider_seconds > 0
@@ -3618,7 +2330,9 @@ def _is_tool_available_in_live_context(
         return True
     if workbench == "PartDesignWorkbench" and _is_partdesign_sketcher_tool(tool.name):
         try:
-            return tool.name == "sketcher.get_sketch" or bool(service.sketcher_summary().get("found"))
+            return tool.name == "sketcher.inspect_sketch" or bool(
+                service.sketcher_summary().get("found")
+            )
         except Exception:
             return False
     return False

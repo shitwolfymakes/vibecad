@@ -11,7 +11,10 @@ from VibeCADTransactions import run_freecad_transaction
 
 TOOL_SPEC = {'description': 'Create a new FreeCAD document and make it active.',
  'name': 'core.create_new_document',
- 'parameters': {'properties': {'name': {'type': 'string'}}, 'type': 'object'},
+ 'parameters': {'properties': {'name': {'description': 'Document name; defaults to '
+                                                       'VibeCAD.',
+                                        'type': 'string'}},
+                'type': 'object'},
  'safety': 'SAFE_WRITE'}
 
 

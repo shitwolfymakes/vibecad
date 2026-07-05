@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Return registered FreeCAD GUI command names.',
+TOOL_SPEC = {'description': 'Return all registered FreeCAD GUI command names; prefer '
+                'core.list_active_workbench_commands for just the active pack.',
  'name': 'core.list_registered_commands',
  'safety': 'READ'}
 

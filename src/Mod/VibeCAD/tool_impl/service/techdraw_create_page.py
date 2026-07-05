@@ -4,14 +4,22 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Create a native TechDraw drawing page in the active document.',
+TOOL_SPEC = {'description': 'Create a TechDraw drawing page for 2D drawings of 3D models; then '
+                'place model views on it with techdraw.add_view.',
  'name': 'techdraw.create_page',
- 'parameters': {'properties': {'label': {'type': 'string'},
-                               'with_template': {'type': 'boolean'}},
+ 'parameters': {'properties': {'label': {'description': 'Page label shown in the '
+                                                        'document tree.',
+                                         'type': 'string'},
+                               'with_template': {'description': 'Attach an empty SVG '
+                                                                'template (default '
+                                                                'false).',
+                                                 'type': 'boolean'}},
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'TechDrawWorkbench'}

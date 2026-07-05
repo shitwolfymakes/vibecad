@@ -29,10 +29,16 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "geometry_index": {"type": "integer"},
-            "geometry_handle": {"type": "string"},
-            "geometry_name": {"type": "string"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "geometry_index": {"type": "integer", "description": "Target geometry index."},
+            "geometry_handle": {
+                "type": "string",
+                "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
+            },
+            "geometry_name": {"type": "string", "description": "Semantic name to assign, targetable later as name:<name>."},
         },
         "required": ["geometry_name"],
     },

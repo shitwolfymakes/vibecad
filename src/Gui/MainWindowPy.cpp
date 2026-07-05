@@ -23,12 +23,15 @@
 
 #include <list>
 
+#include <QAction>
+#include <QDockWidget>
 
 #include <Base/TypePy.h>
 
 #include "DocumentPy.h"
 #include "MainWindowPy.h"
 #include "MainWindow.h"
+#include "DockWindowManager.h"
 #include "MDIView.h"
 #include "MDIViewPy.h"
 #include "MDIViewPyWrap.h"
@@ -68,6 +71,22 @@ void MainWindowPy::init_type()
         "removeStatusBarItem",
         &MainWindowPy::removeStatusBarItem,
         "removeStatusBarItem(id)"
+    );
+    add_keyword_method(
+        "addDockWindow",
+        &MainWindowPy::addDockWindow,
+        "addDockWindow(widget, name, area='right')\n"
+        "Registers a widget as a first-class dock window through the "
+        "DockWindowManager. The dock gets the native overlay title bar, "
+        "overlay-mode eligibility, visibility persistence and a "
+        "View->Panels entry. Returns the QDockWidget container."
+    );
+    add_varargs_method(
+        "removeDockWindow",
+        &MainWindowPy::removeDockWindow,
+        "removeDockWindow(name)\n"
+        "Removes the dock window with the given name; the embedded "
+        "widget is not destroyed."
     );
     behaviors().readyType();
 }
@@ -110,6 +129,8 @@ Py::Object MainWindowPy::createWrapper(MainWindow* mw)
         "hideHint",
         "addStatusBarItem",
         "removeStatusBarItem",
+        "addDockWindow",
+        "removeDockWindow",
     };
 
     Py::Object py = wrap.fromQWidget(mw, "QMainWindow");
@@ -361,6 +382,96 @@ Py::Object MainWindowPy::removeStatusBarItem(const Py::Tuple& args)
     }
     if (_mw) {
         _mw->removeStatusBarItem(QByteArray(id));
+    }
+    return Py::None();
+}
+
+Py::Object MainWindowPy::addDockWindow(const Py::Tuple& args, const Py::Dict& kwds)
+{
+    PyObject* pyWidget {};
+    const char* name {};
+    const char* area = "right";
+
+    static char* argNames[] = {
+        const_cast<char*>("widget"),
+        const_cast<char*>("name"),
+        const_cast<char*>("area"),
+        nullptr
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args.ptr(),
+            kwds.ptr(),
+            "Os|s",
+            argNames,
+            &pyWidget,
+            &name,
+            &area
+        )) {
+        throw Py::Exception();
+    }
+
+    PythonWrapper wrap;
+    if (!wrap.loadCoreModule() || !wrap.loadGuiModule() || !wrap.loadWidgetsModule()) {
+        throw Py::RuntimeError("addDockWindow: failed to load Python wrapper for Qt");
+    }
+    QWidget* widget = qobject_cast<QWidget*>(wrap.toQObject(Py::Object(pyWidget)));
+    if (!widget) {
+        throw Py::TypeError("addDockWindow: first argument must be a QWidget");
+    }
+
+    const QByteArray areaName = QByteArray(area).toLower();
+    Qt::DockWidgetArea pos = Qt::AllDockWidgetAreas;
+    if (areaName == "left") {
+        pos = Qt::LeftDockWidgetArea;
+    }
+    else if (areaName == "right") {
+        pos = Qt::RightDockWidgetArea;
+    }
+    else if (areaName == "top") {
+        pos = Qt::TopDockWidgetArea;
+    }
+    else if (areaName == "bottom") {
+        pos = Qt::BottomDockWidgetArea;
+    }
+    else if (areaName != "all") {
+        throw Py::ValueError(
+            "addDockWindow: area must be one of 'left', 'right', 'top', 'bottom' or 'all'"
+        );
+    }
+
+    DockWindowManager* dwm = DockWindowManager::instance();
+    if (dwm->getDockWindow(name)) {
+        throw Py::ValueError("addDockWindow: a dock window with this name already exists");
+    }
+
+    dwm->registerDockWindow(name, widget);
+    QDockWidget* dw = dwm->addDockWindow(name, widget, pos);
+    if (!dw) {
+        throw Py::RuntimeError("addDockWindow: failed to create the dock window");
+    }
+
+    // Mirror DockWindowManager::setup(): the toggle-view action data is the
+    // key used for visibility persistence, and addDockWindow() hides the
+    // dock by default to avoid flicker during layout restore.
+    dw->toggleViewAction()->setData(QString::fromUtf8(name));
+    widget->show();
+    dw->show();
+
+    return wrap.fromQWidget(dw, "QDockWidget");
+}
+
+Py::Object MainWindowPy::removeDockWindow(const Py::Tuple& args)
+{
+    const char* name {};
+    if (!PyArg_ParseTuple(args.ptr(), "s", &name)) {
+        throw Py::Exception();
+    }
+    DockWindowManager* dwm = DockWindowManager::instance();
+    dwm->unregisterDockWindow(name);
+    QWidget* widget = dwm->removeDockWindow(name);
+    if (widget) {
+        // detach so the caller keeps ownership of the embedded widget
+        widget->setParent(nullptr);
     }
     return Py::None();
 }

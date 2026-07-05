@@ -11,13 +11,22 @@ from .common import active_response, external_geometry_summary, get_sketch, run_
 
 TOOL_SPEC = {
     "name": "sketcher.remove_external_geometry",
-    "description": "Remove one native Sketcher external geometry reference by external geometry index.",
+    "description": (
+        "Remove one native Sketcher external geometry reference by external geometry index. "
+        "List current references with sketcher.inspect_sketch include=['external_geometry']."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "external_geometry_index": {"type": "integer"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "external_geometry_index": {
+                "type": "integer",
+                "description": "External geometry index to remove (0-based, as reported by inspect_sketch).",
+            },
         },
         "required": ["external_geometry_index"],
     },

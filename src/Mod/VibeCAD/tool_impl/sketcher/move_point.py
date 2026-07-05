@@ -12,18 +12,36 @@ from .constrain_common import point_position
 
 TOOL_SPEC = {
     "name": "sketcher.move_point",
-    "description": "Move one existing Sketcher geometry point role or whole geometry to an absolute or relative 2D location, equivalent to dragging geometry in Sketcher.",
+    "description": (
+        "Move one existing Sketcher geometry point role or whole geometry to an absolute or "
+        "relative 2D location, equivalent to dragging geometry in Sketcher. Drags a single "
+        "point or element — use sketcher.transform_geometry for multi-element move/copy/mirror "
+        "and sketcher.modify_geometry to trim/extend/split/fillet curves."
+    ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {"type": "string"},
-            "geometry_index": {"type": "integer"},
-            "geometry_handle": {"type": "string"},
-            "point": {"type": "string", "enum": ["whole", "start", "end", "center", "midpoint"]},
-            "x": {"type": "number"},
-            "y": {"type": "number"},
-            "relative": {"type": "boolean"},
+            "sketch_name": {
+                "type": "string",
+                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+            },
+            "geometry_index": {"type": "integer", "description": "Target geometry index."},
+            "geometry_handle": {
+                "type": "string",
+                "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
+            },
+            "point": {
+                "type": "string",
+                "enum": ["whole", "start", "end", "center", "midpoint"],
+                "description": "Point role to move, or 'whole' to move the entire element.",
+            },
+            "x": {"type": "number", "description": "Target X in mm (or X delta when relative=true)."},
+            "y": {"type": "number", "description": "Target Y in mm (or Y delta when relative=true)."},
+            "relative": {
+                "type": "boolean",
+                "description": "When true, treat x/y as a delta from the current position. Default false (absolute).",
+            },
         },
         "required": ["point", "x", "y"],
     },

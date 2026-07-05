@@ -1,10 +1,102 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Workbench-specific VibeCAD tool-pack metadata."""
+"""Workbench-specific VibeCAD tool-pack metadata.
+
+Each pack declares the explicit provider tool names it contributes to the
+model-facing tool surface. The active provider surface is always the shared
+core tool set plus the entered pack's ``tool_names``; packs with an empty
+``tool_names`` tuple rely on the core tools (document/view inspection,
+``core.list_workbench_objects``, workspace switching) alone.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "sketcher.create_sketch",
+    "sketcher.open_sketch",
+    "sketcher.close_sketch",
+    "sketcher.inspect_sketch",
+    "sketcher.resolve_geometry",
+    "sketcher.set_geometry_name",
+    "sketcher.draw_rectangle",
+    "sketcher.add_geometry",
+    "sketcher.add_hole_pattern",
+    "sketcher.add_slot",
+    "sketcher.add_constraint",
+    "sketcher.edit_constraint",
+    "sketcher.move_point",
+    "sketcher.transform_geometry",
+    "sketcher.modify_geometry",
+    "sketcher.add_external_geometry",
+    "sketcher.remove_external_geometry",
+    "sketcher.delete_items",
+    "sketcher.set_construction",
+)
+
+# PartDesign owns its sketches, so the PartDesign pack includes the sketcher
+# tool set in addition to the native feature tools. ``sketcher.create_sketch``
+# is deliberately excluded: inside PartDesign, sketches must be created with
+# ``partdesign.create_sketch`` so they belong to the active Body.
+PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "partdesign.get_bodies",
+    "partdesign.find_subelements",
+    # Clearance/interference checks between bodies (for example rotor vs
+    # housing) belong in the modeling loop, not only after a workbench switch.
+    "assembly.check_interference",
+    "partdesign.create_body",
+    "partdesign.create_sketch",
+    "partdesign.create_datum_plane",
+    "partdesign.create_datum_line",
+    "partdesign.extrude",
+    "partdesign.hole_from_sketch",
+    "partdesign.revolve",
+    "partdesign.loft_profiles",
+    "partdesign.sweep_profile",
+    "partdesign.helix_profile",
+    "partdesign.pattern",
+    "partdesign.dressup",
+    "partdesign.boolean_bodies",
+    "partdesign.set_feature_dimensions",
+) + tuple(
+    name for name in SKETCHER_PACK_TOOL_NAMES if name != "sketcher.create_sketch"
+)
+
+PART_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "part.set_placement",
+    "part.cut_cylindrical_hole",
+    "part.dressup",
+    "part.thicken_surface",
+    # Geometric face/edge resolver: works on any shaped object, so the Part
+    # pack exposes it for stable dressup/hole subelement selection too.
+    "partdesign.find_subelements",
+)
+
+# Surface-first modeling is one coherent workflow: build 3D boundary curves,
+# fill/loft surfaces between them, then thicken into a solid. The pack
+# exposes all three stages plus the geometric subelement resolver.
+SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "surface.create_surface",
+    "draft.create_wire",
+    "part.thicken_surface",
+    "partdesign.find_subelements",
+)
+
+ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "assembly.get_assemblies",
+    "assembly.create_assembly",
+    "assembly.add_component",
+    "assembly.set_component_placement",
+    "assembly.check_interference",
+)
+
+TECHDRAW_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "techdraw.get_pages",
+    "techdraw.create_page",
+    "techdraw.add_view",
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +107,7 @@ class WorkbenchToolPack:
     command_prefixes: tuple[str, ...]
     object_types: tuple[str, ...] = ()
     object_templates: tuple[dict[str, str], ...] = ()
+    tool_names: tuple[str, ...] = field(default=())
 
     def summary(self) -> dict[str, object]:
         return {
@@ -24,6 +117,7 @@ class WorkbenchToolPack:
             "command_prefixes": list(self.command_prefixes),
             "object_types": list(self.object_types),
             "object_templates": list(self.object_templates),
+            "tool_names": list(self.tool_names),
         }
 
 
@@ -35,6 +129,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Assembly_",),
         ("Assembly::AssemblyObject",),
         ({"name": "assembly", "object_type": "Assembly::AssemblyObject"},),
+        tool_names=ASSEMBLY_PACK_TOOL_NAMES,
     ),
     "BIMWorkbench": WorkbenchToolPack(
         "BIMWorkbench",
@@ -65,6 +160,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "draft_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "annotation_group", "object_type": "App::DocumentObjectGroup"},
         ),
+        tool_names=("draft.create_array", "draft.create_wire"),
     ),
     "FemWorkbench": WorkbenchToolPack(
         "FemWorkbench",
@@ -92,11 +188,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Material_", "Mat"),
         (),
         ({"name": "material_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=("material.apply_appearance",),
     ),
     "MeshWorkbench": WorkbenchToolPack(
         "MeshWorkbench",
         "mesh repair and editing",
-        "Treat mesh simplification and repair as write operations requiring approval.",
+        "Treat mesh simplification and repair as destructive edits: inspect the mesh and state the intended repair before modifying it.",
         ("Mesh_",),
         ("Mesh::",),
         ({"name": "mesh_group", "object_type": "App::DocumentObjectGroup"},),
@@ -104,7 +201,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "MeshPartWorkbench": WorkbenchToolPack(
         "MeshPartWorkbench",
         "mesh/part conversion",
-        "Use MeshPart tessellation tools for explicit Part-to-mesh workflows and require approval for generated meshes.",
+        "Use MeshPart tessellation tools for explicit Part-to-mesh workflows; choose deviation/angle settings deliberately and verify the generated mesh against the source solid.",
         ("MeshPart_",),
         ("Mesh::", "Part::"),
         ({"name": "mesh_from_shape", "object_type": "Mesh::Feature"},),
@@ -129,12 +226,19 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         "PartDesignWorkbench",
         "parametric solid features",
         (
-            "Prefer the same feature flow a human would use: create or reuse a Body, "
-            "create constrained sketches, then create PartDesign features such as Pad. "
-            "When the document has no model yet, start by creating the document/body "
-            "and a deliberate base sketch instead of enumerating tools. Add only the "
-            "feature operations the design needs, then inspect solver/profile state "
-            "and the resulting solid before completion."
+            "Model skeleton-first: create a Body, then a master layout sketch on an "
+            "origin or datum plane that carries the governing dimensions, axes, and "
+            "symmetry lines of the part. Downstream sketches reference that layout via "
+            "external geometry instead of re-typing values; derived dimensions use "
+            "constraint expressions so one governing change updates the whole part. "
+            "Choose each feature by the surface character it must produce: pad/pocket "
+            "for prismatic walls, revolve/groove for rotational bodies, loft_profiles "
+            "or sweep_profile for blades, fins, ducts, and other flow or transition "
+            "surfaces (never a straight pad), helix_profile for threads and springs. "
+            "Order the feature tree deliberately: datums, base feature, additive, "
+            "subtractive, patterns, dressups last. Fully constrain every sketch and "
+            "verify each feature's shape delta against the intended dimensions before "
+            "building on it."
         ),
         ("PartDesign_", "Sketcher_"),
         ("PartDesign::", "Sketcher::SketchObject"),
@@ -142,11 +246,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "body", "object_type": "PartDesign::Body"},
             {"name": "sketch", "object_type": "Sketcher::SketchObject"},
         ),
+        tool_names=PARTDESIGN_PACK_TOOL_NAMES,
     ),
     "PartWorkbench": WorkbenchToolPack(
         "PartWorkbench",
         "boundary-representation solids",
-        "Use Part operations for primitive solids and boolean modeling; preserve object labels.",
+        "Use Part operations for placement, holes, dressups, and boolean modeling; preserve object labels.",
         ("Part_",),
         ("Part::",),
         (
@@ -154,6 +259,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "cylinder", "object_type": "Part::Cylinder"},
             {"name": "sphere", "object_type": "Part::Sphere"},
         ),
+        tool_names=PART_PACK_TOOL_NAMES,
     ),
     "PointsWorkbench": WorkbenchToolPack(
         "PointsWorkbench",
@@ -182,10 +288,18 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "SketcherWorkbench": WorkbenchToolPack(
         "SketcherWorkbench",
         "2D constrained sketches",
-        "Prefer constraint-aware sketch changes and avoid unconstrained geometry edits.",
+        (
+            "Anchor every sketch to the origin and exploit symmetry about the axes. "
+            "Reuse existing model edges through external geometry instead of redrawing "
+            "or re-measuring them, and drive derived dimensions with constraint "
+            "expressions referencing the governing values. Fully constrain sketches "
+            "before they drive features; dimension from part function, not arbitrary "
+            "values, and use construction geometry for layout lines and centers."
+        ),
         ("Sketcher_",),
         ("Sketcher::SketchObject",),
         ({"name": "sketch", "object_type": "Sketcher::SketchObject"},),
+        tool_names=SKETCHER_PACK_TOOL_NAMES,
     ),
     "SpreadsheetWorkbench": WorkbenchToolPack(
         "SpreadsheetWorkbench",
@@ -194,11 +308,19 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Spreadsheet_",),
         ("Spreadsheet::Sheet",),
         ({"name": "sheet", "object_type": "Spreadsheet::Sheet"},),
+        tool_names=("spreadsheet.get_sheet",),
     ),
     "SurfaceWorkbench": WorkbenchToolPack(
         "SurfaceWorkbench",
         "surface modeling",
-        "Inspect edge/face selection context before creating or changing surface features.",
+        (
+            "Model surface-first: create boundary curves (sketches or 3D wires "
+            "via draft.create_wire), fill or loft surfaces between them with "
+            "surface.create_surface, then convert to a solid with "
+            "part.thicken_surface when a manufacturable part is the goal. "
+            "Inspect edge/face selection context before creating or changing "
+            "surface features."
+        ),
         ("Surface_",),
         ("Surface::",),
         (
@@ -206,6 +328,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "geom_fill_surface", "object_type": "Surface::GeomFillSurface"},
             {"name": "sections", "object_type": "Surface::Sections"},
         ),
+        tool_names=SURFACE_PACK_TOOL_NAMES,
     ),
     "TechDrawWorkbench": WorkbenchToolPack(
         "TechDrawWorkbench",
@@ -217,11 +340,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "page_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "drawing_group", "object_type": "App::DocumentObjectGroup"},
         ),
+        tool_names=TECHDRAW_PACK_TOOL_NAMES,
     ),
     "TestWorkbench": WorkbenchToolPack(
         "TestWorkbench",
         "test framework",
-        "Prefer read-only inspection of test commands; require approval before running test commands.",
+        "Prefer read-only inspection of test commands; run test commands only when the task explicitly calls for it.",
         ("Test_", "Std_Test"),
         (),
         ({"name": "test_group", "object_type": "App::DocumentObjectGroup"},),

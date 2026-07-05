@@ -10,18 +10,26 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
-TOOL_SPEC = {'description': 'Set the placement of an existing component that belongs '
-                'to a native Assembly, equivalent to deliberately positioning a '
-                'component in the assembly workspace.',
+TOOL_SPEC = {'description': 'Set the placement of a component inside a native Assembly: '
+                'position plus yaw/pitch/roll rotation. For objects outside an '
+                'assembly use part.set_placement.',
  'name': 'assembly.set_component_placement',
- 'parameters': {'properties': {'assembly_name': {'type': 'string'},
-                               'component_name': {'type': 'string'},
-                               'pitch_degrees': {'type': 'number'},
-                               'roll_degrees': {'type': 'number'},
-                               'x': {'type': 'number'},
-                               'y': {'type': 'number'},
-                               'yaw_degrees': {'type': 'number'},
-                               'z': {'type': 'number'}},
+ 'parameters': {'properties': {'assembly_name': {'description': 'Assembly name or label. Defaults to the first assembly in the document.',
+                                                 'type': 'string'},
+                               'component_name': {'description': 'Component name or label to reposition.',
+                                                  'type': 'string'},
+                               'pitch_degrees': {'description': 'Rotation about Y axis in degrees.',
+                                                 'type': 'number'},
+                               'roll_degrees': {'description': 'Rotation about X axis in degrees.',
+                                                'type': 'number'},
+                               'x': {'description': 'X position in mm.',
+                                     'type': 'number'},
+                               'y': {'description': 'Y position in mm.',
+                                     'type': 'number'},
+                               'yaw_degrees': {'description': 'Rotation about Z axis in degrees.',
+                                               'type': 'number'},
+                               'z': {'description': 'Z position in mm.',
+                                     'type': 'number'}},
                 'required': ['component_name'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',

@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Return bounded visible FreeCAD task-panel/widget state after commands '
-                'open UI.',
+TOOL_SPEC = {'description': 'Return bounded visible task-panel/widget state; check after a GUI '
+                'command opens a dialog or task panel.',
  'name': 'core.get_task_panel',
  'safety': 'READ'}
 
