@@ -28,6 +28,8 @@ class _BaseToolBitSerializerTestCase(PathTestWithAssets):
 
     def setUp(self):
         """Create a tool bit for each test."""
+        if type(self) is _BaseToolBitSerializerTestCase:
+            self.skipTest("abstract base test class; run concrete serializer subclasses")
         super().setUp()
         if self.serializer_class is None or not issubclass(self.serializer_class, AssetSerializer):
             raise NotImplementedError("Subclasses must define a valid serializer_class")

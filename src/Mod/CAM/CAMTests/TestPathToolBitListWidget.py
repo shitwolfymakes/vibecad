@@ -25,12 +25,14 @@
 
 from typing import cast
 import unittest
+import FreeCAD
 from Path.Tool.toolbit import ToolBit
 from Path.Tool.toolbit.ui.toollist import ToolBitListWidget, ToolBitUriRole
 from Path.Tool.toolbit.ui.tablecell import TwoLineTableCell
 from .PathTestUtils import PathTestWithAssets  # Import the base test class
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestToolBitListWidget(PathTestWithAssets):
     """Tests for ToolBitListWidget using real assets."""
 

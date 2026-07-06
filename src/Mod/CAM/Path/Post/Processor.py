@@ -2144,6 +2144,9 @@ class PostProcessor:
         # in the init_shared_values routine.
         #
         values["UNITS"] = self._units
+        # Canonical output-units default; overridden by machine config or the
+        # configuration bundle in apply_configuration_bundle() when present.
+        values["OUTPUT_UNITS"] = OutputUnits.METRIC
 
     def process_arguments(self) -> Tuple[bool, ParserArgs]:
         """Process any arguments to the postprocessor."""
@@ -2507,7 +2510,8 @@ class PostProcessor:
 
         def _convert_axis_param(value):
             # Apply unit conversion based on machine units setting
-            is_imperial = self.values["OUTPUT_UNITS"] == OutputUnits.IMPERIAL
+            # (default METRIC if no machine/bundle has populated the value)
+            is_imperial = self.values.get("OUTPUT_UNITS", OutputUnits.METRIC) == OutputUnits.IMPERIAL
 
             if is_imperial:
                 converted_value = value / 25.4  # Convert mm to inches

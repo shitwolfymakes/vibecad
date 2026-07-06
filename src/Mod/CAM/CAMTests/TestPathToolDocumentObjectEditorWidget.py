@@ -39,6 +39,7 @@ from Path.Tool.docobject.ui.property import (
 )
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestDocumentObjectEditorWidget(unittest.TestCase):
     """Tests for DocumentObjectEditorWidget."""
 

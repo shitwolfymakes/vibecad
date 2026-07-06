@@ -22,10 +22,14 @@ class BaseTestPathToolAssetStore(unittest.TestCase):
     store: AssetStore
 
     def setUp(self):
+        if type(self) is BaseTestPathToolAssetStore:
+            self.skipTest("abstract base test class; run concrete store subclasses")
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = pathlib.Path(self.tmp_dir.name)
 
     def tearDown(self):
+        if type(self) is BaseTestPathToolAssetStore:
+            return
         self.tmp_dir.cleanup()
 
     def test_name(self):

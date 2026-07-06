@@ -26,12 +26,14 @@
 import unittest
 from unittest.mock import MagicMock
 from typing import cast
+import FreeCAD
 from Path.Tool.toolbit.ui.browser import ToolBitBrowserWidget, ToolBitUriRole
 from Path.Tool.toolbit.ui.tablecell import TwoLineTableCell
 from Path.Tool.toolbit.models.base import ToolBit
 from .PathTestUtils import PathTestWithAssets
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestToolBitBrowserWidget(PathTestWithAssets):
     """Tests for ToolBitBrowserWidget using real assets and widgets."""
 

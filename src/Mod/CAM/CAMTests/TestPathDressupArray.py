@@ -25,8 +25,6 @@
 import FreeCAD
 import Path
 from Path.Dressup.Array import DressupArray
-import Path.Main.Job as PathJob
-import Path.Op.Profile as PathProfile
 
 from CAMTests.PathTestUtils import PathTestBase
 
@@ -37,6 +35,7 @@ class _TestEngrave:
         self.ToolController = None  # default tool 5mm
         self.CoolantMode = "None"
         self.Name = "Engrave"
+        self.Active = True
 
     def isDerivedFrom(self, type):
         if type == "Path::Feature":

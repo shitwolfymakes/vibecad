@@ -36,6 +36,7 @@ from Path.Tool.docobject.ui.property import (
 )
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestPropertyEditorFactory(unittest.TestCase):
     """Tests the BasePropertyEditorWidget.for_property factory method."""
 
@@ -84,6 +85,7 @@ class TestPropertyEditorFactory(unittest.TestCase):
         self.assertIsInstance(widget, LabelPropertyEditorWidget)
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestQuantityPropertyEditorWidget(unittest.TestCase):
     """Tests for QuantityPropertyEditorWidget."""
 
@@ -116,6 +118,7 @@ class TestQuantityPropertyEditorWidget(unittest.TestCase):
         self.assertEqual(updated_value, FreeCAD.Units.Quantity("15.5 in"))
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestBoolPropertyEditorWidget(unittest.TestCase):
     """Tests for BoolPropertyEditorWidget."""
 
@@ -147,6 +150,7 @@ class TestBoolPropertyEditorWidget(unittest.TestCase):
         self.assertEqual(self.obj.getPropertyByName("IsEnabled"), True)
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestIntPropertyEditorWidget(unittest.TestCase):
     """Tests for IntPropertyEditorWidget."""
 
@@ -174,6 +178,7 @@ class TestIntPropertyEditorWidget(unittest.TestCase):
         self.assertEqual(self.obj.getPropertyByName("Count"), 42)
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestEnumPropertyEditorWidget(unittest.TestCase):
     """Tests for EnumPropertyEditorWidget."""
 
@@ -212,6 +217,7 @@ class TestEnumPropertyEditorWidget(unittest.TestCase):
         self.assertEqual(self.obj.getPropertyByName("Mode"), "Semi")
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestLabelPropertyEditorWidget(unittest.TestCase):
     """Tests for LabelPropertyEditorWidget."""
 

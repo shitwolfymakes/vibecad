@@ -25,6 +25,7 @@
 
 import unittest
 from unittest.mock import MagicMock
+import FreeCAD
 from Path.Tool.toolbit.ui.editor import ToolBitPropertiesWidget
 from Path.Tool.toolbit.models.base import ToolBit
 from Path.Tool.shape.ui.shapewidget import ShapeWidget
@@ -32,6 +33,7 @@ from Path.Tool.docobject.ui.property import BasePropertyEditorWidget
 from .PathTestUtils import PathTestWithAssets
 
 
+@unittest.skipUnless(FreeCAD.GuiUp, "Widget tests require the FreeCAD GUI (QApplication)")
 class TestToolBitPropertiesWidget(PathTestWithAssets):
     """Tests for ToolBitEditorWidget using real assets and widgets."""
 
@@ -106,7 +108,6 @@ class TestToolBitPropertiesWidget(PathTestWithAssets):
         toolbit = self.assets.get("toolbit://5mm_Endmill")
         self.widget.load_toolbit(toolbit)
 
-        initial_label = toolbit.obj.Label
         new_label = "Another Label"
         self.widget._label_edit.setText(new_label)
 
