@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 from VibeCADAuth import (
     AuthState,
@@ -42,6 +43,8 @@ from VibeCADProvider import (
     MAX_PROVIDER_IMAGE_BYTES,
     _build_provider_function_tools,
     _provider_reasoning_effort,
+    _provider_spawn_python_executable,
+    _provider_subprocess_smoke,
     _run_agents_subprocess,
     _temporary_openai_env,
     _write_anthropic_request_dump,
@@ -258,6 +261,21 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
             self.assertIsNone(_provider_reasoning_effort(value))
         self.assertEqual(_provider_reasoning_effort("LOW"), "low")
         self.assertEqual(_provider_reasoning_effort(" high "), "high")
+
+    def test_provider_spawn_python_executable_prefers_adjacent_python_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            freecad_exe = directory / "FreeCAD.exe"
+            python_exe = directory / "python.exe"
+            freecad_exe.write_text("", encoding="utf-8")
+            python_exe.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
+                sys, "executable", str(freecad_exe)
+            ):
+                self.assertEqual(_provider_spawn_python_executable(), str(python_exe))
+
+    def test_provider_subprocess_smoke_completes(self):
+        _provider_subprocess_smoke()
 
 
 class TestVibeCADProviderBaseUrl(unittest.TestCase):

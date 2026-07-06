@@ -388,6 +388,92 @@ def _provider_reasoning_effort(value: str | None) -> str | None:
     return clean
 
 
+def _provider_spawn_python_executable() -> str | None:
+    if sys.platform != "win32":
+        return None
+
+    candidates: list[Path] = []
+    current_executable = Path(sys.executable or "")
+    if current_executable.name.lower() in {"python.exe", "pythonw.exe"}:
+        candidates.append(current_executable)
+    elif current_executable.name:
+        candidates.extend(
+            [
+                current_executable.with_name("python.exe"),
+                current_executable.with_name("pythonw.exe"),
+            ]
+        )
+
+    for prefix in {sys.prefix, getattr(sys, "base_prefix", "")}:
+        if prefix:
+            candidates.extend([Path(prefix) / "python.exe", Path(prefix) / "pythonw.exe"])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        if not candidate_text or candidate_text in seen:
+            continue
+        seen.add(candidate_text)
+        if candidate.exists():
+            return candidate_text
+    return None
+
+
+def _provider_multiprocessing_context() -> multiprocessing.context.BaseContext:
+    start_methods = multiprocessing.get_all_start_methods()
+    if "fork" in start_methods:
+        return multiprocessing.get_context("fork")
+
+    if sys.platform == "win32":
+        python_executable = _provider_spawn_python_executable()
+        if not python_executable:
+            raise ProviderUnavailable(
+                "VibeCAD cannot start the AI provider process because python.exe "
+                "was not found in the packaged runtime."
+            )
+        multiprocessing.set_executable(python_executable)
+
+    if "spawn" in start_methods:
+        return multiprocessing.get_context("spawn")
+    return multiprocessing.get_context()
+
+
+def _provider_subprocess_smoke_child_main(
+    conn,
+    prompt: str,
+    context: dict[str, Any],
+    model: str,
+    api_key: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: float | None,
+    max_turns: int | None,
+    clear_inherited_modules: bool,
+    base_url: str | None = None,
+) -> None:
+    try:
+        conn.send({"type": "done", "final_output": "ok", "raw": {"pid": os.getpid()}})
+    finally:
+        conn.close()
+
+
+def _provider_subprocess_smoke() -> None:
+    result = _run_agents_subprocess(
+        prompt="smoke",
+        context={},
+        tool_runner=None,
+        model="smoke",
+        api_key=None,
+        reasoning_effort=None,
+        timeout_seconds=10.0,
+        max_turns=1,
+        clear_inherited_modules=False,
+        child_main=_provider_subprocess_smoke_child_main,
+        provider_label="VibeCAD provider subprocess smoke",
+    )
+    if result.final_output != "ok":
+        raise RuntimeError(f"Unexpected provider subprocess smoke result: {result!r}")
+
+
 def _run_agents_subprocess(
     *,
     prompt: str,
@@ -406,11 +492,7 @@ def _run_agents_subprocess(
     child_main: Callable[..., None] | None = None,
     provider_label: str = "OpenAI Agents provider",
 ) -> ProviderResult:
-    multiprocessing_context = (
-        multiprocessing.get_context("fork")
-        if "fork" in multiprocessing.get_all_start_methods()
-        else multiprocessing.get_context()
-    )
+    multiprocessing_context = _provider_multiprocessing_context()
     reasoning_effort = _provider_reasoning_effort(reasoning_effort)
     parent_conn, child_conn = multiprocessing_context.Pipe()
     process = multiprocessing_context.Process(
