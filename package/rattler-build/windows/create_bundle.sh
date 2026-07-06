@@ -8,6 +8,8 @@ conda_env="$(pwd)/../.pixi/envs/default/"
 copy_dir="VibeCAD_Windows"
 mkdir -p ${copy_dir}/bin
 
+../scripts/install_vibecad_provider_deps.sh "${conda_env}"
+
 # Copy Conda's Python and (U)CRT to FreeCAD/bin
 cp -a ${conda_env}/DLLs ${copy_dir}/bin/DLLs
 cp -a ${conda_env}/Lib ${copy_dir}/bin/Lib

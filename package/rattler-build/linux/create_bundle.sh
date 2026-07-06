@@ -7,6 +7,7 @@ conda_env="AppDir/usr"
 
 mkdir -p ${conda_env}
 
+../scripts/install_vibecad_provider_deps.sh ../.pixi/envs/default
 cp -a ../.pixi/envs/default/* ${conda_env}
 
 echo -e "\nDelete unnecessary stuff"
