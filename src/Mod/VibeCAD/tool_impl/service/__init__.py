@@ -81,9 +81,6 @@ TOOL_MODULE_NAMES = (
     'cam_validate_job',
     'cam_postprocess',
     'model_build_from_script',
-    'core_list_pending_actions',
-    'core_apply_action',
-    'core_reject_action',
     'core_undo_last_vibecad_action',
     'core_clear_local_session',
 )

@@ -60,9 +60,6 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             "core.create_new_document",
             "core.open_document",
             "core.delete_object",
-            "core.list_pending_actions",
-            "core.apply_action",
-            "core.reject_action",
             "core.undo_last_vibecad_action",
             "core.clear_local_session",
         }
@@ -256,11 +253,10 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                 self.assertNotIn("handler", module.TOOL_SPEC)
                 module_source = inspect.getsource(module)
                 self.assertNotIn("return service.propose_", module_source)
-                if module_name != "core_apply_action":
-                    self.assertNotRegex(
-                        module_source,
-                        r"return service\.(create_|add_|apply_|cut_|set_)",
-                    )
+                self.assertNotRegex(
+                    module_source,
+                    r"return service\.(create_|add_|apply_|cut_|set_)",
+                )
 
     def test_service_tool_modules_do_not_delegate_back_to_core_tool_methods(self):
         from tool_impl import service as service_tools
@@ -268,7 +264,6 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         blocked_core_tool_methods = {
             "activate_workbench",
             "all_workbench_tool_packs",
-            "apply_action",
             "assembly_summary",
             "bim_summary",
             "cam_summary",
@@ -286,9 +281,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             "openscad_summary",
             "part_summary",
             "partdesign_summary",
-            "pending_actions",
             "points_summary",
-            "reject_action",
             "report_tool_shape_gap",
             "report_view_errors",
             "reverseengineering_summary",
@@ -419,6 +412,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             path = Path(tmp) / ".env"
             path.write_text("OPENAI_API_KEY='sk-test123456'\n", encoding="utf-8")
             service = VibeCADService(dotenv_path=path)
+            service.provider_name = lambda: "openai"
             self.assertEqual(service.provider_api_key(), "sk-test123456")
             self.assertNotIn("sk-test123456", str(service.context_summary()))
 

@@ -891,83 +891,8 @@ def _run_prompt_from_panel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Activity section (pending actions, history, tool trace)
+# Activity section (tool trace)
 # ---------------------------------------------------------------------------
-
-
-def _pending_action_ids() -> list[str]:
-    service = get_service()
-    return [item["id"] for item in service.pending_actions()["pending"]]
-
-
-def _selected_action_id() -> str | None:
-    selector = _find_child("QComboBox", "VibeActionSelector")
-    if selector is None:
-        return None
-    value = selector.currentData()
-    return str(value) if value else None
-
-
-def _refresh_pending_actions(dock: Any | None = None) -> None:
-    pending_box = _find_child("QPlainTextEdit", "VibeActivityPending", dock)
-    selector = _find_child("QComboBox", "VibeActionSelector", dock)
-    if pending_box is None:
-        return
-    try:
-        pending = get_service().pending_actions()["pending"]
-    except Exception as exc:
-        pending_box.setPlainText(f"Pending actions unavailable: {exc}")
-        return
-    if selector is not None:
-        current = selector.currentData()
-        selector.clear()
-        for item in pending:
-            selector.addItem(f"{item['id']} | {item['title']}", item["id"])
-        if current:
-            index = selector.findData(current)
-            if index >= 0:
-                selector.setCurrentIndex(index)
-    if not pending:
-        pending_box.setPlainText("No pending actions.")
-        return
-    lines = [
-        f"{item['id']} | {item['safety']} | {item['title']}\n{item['description']}"
-        for item in pending
-    ]
-    pending_box.setPlainText("\n\n".join(lines))
-
-
-def _refresh_action_history(dock: Any | None = None) -> None:
-    history_box = _find_child("QPlainTextEdit", "VibeActivityHistory", dock)
-    if history_box is None:
-        return
-    try:
-        history = get_service().action_history()["history"]
-    except Exception as exc:
-        history_box.setPlainText(f"Action history unavailable: {exc}")
-        return
-    if not history:
-        history_box.setPlainText("No approved or rejected actions yet.")
-        return
-    lines = []
-    for item in history[-12:]:
-        status = item.get("status", "unknown")
-        title = item.get("title", "Untitled action")
-        detail = ""
-        result = item.get("result")
-        if isinstance(result, dict):
-            if result.get("ok") is False and result.get("error"):
-                detail = f" | {result['error']}"
-            elif isinstance(result.get("verification"), dict):
-                detail = f" | verified: {bool(result['verification'].get('ok', True))}"
-                delta = result.get("document_delta")
-                if isinstance(delta, dict):
-                    detail += f" | objects: {delta.get('object_count_delta', 0):+d}"
-                report_errors = result.get("report_view_errors")
-                if isinstance(report_errors, dict) and report_errors.get("errors"):
-                    detail += f" | report errors: {len(report_errors['errors'])}"
-        lines.append(f"{item.get('id', 'action')} | {status} | {title}{detail}")
-    history_box.setPlainText("\n".join(lines))
 
 
 def _refresh_activity(dock: Any | None = None) -> None:
@@ -976,39 +901,9 @@ def _refresh_activity(dock: Any | None = None) -> None:
     if dock is None:
         return
     try:
-        _refresh_pending_actions(dock)
-        _refresh_action_history(dock)
         _set_view_status(get_service().view_screenshot_summary())
     except Exception as exc:
         _warn(f"VibeCAD activity refresh failed: {exc}")
-
-
-def _apply_selected_action() -> None:
-    action_id = _selected_action_id()
-    if action_id is None:
-        ids = _pending_action_ids()
-        action_id = ids[0] if ids else None
-    if action_id is None:
-        _append_output("No pending action to approve.")
-        _refresh_pending_actions()
-        return
-    result = get_service().apply_action(action_id)
-    _append_output(f"Approved {action_id}:\n{result}")
-    _refresh_activity()
-
-
-def _reject_selected_action() -> None:
-    action_id = _selected_action_id()
-    if action_id is None:
-        ids = _pending_action_ids()
-        action_id = ids[0] if ids else None
-    if action_id is None:
-        _append_output("No pending action to reject.")
-        _refresh_pending_actions()
-        return
-    result = get_service().reject_action(action_id)
-    _append_output(f"Rejected {action_id}:\n{result}")
-    _refresh_activity()
 
 
 # ---------------------------------------------------------------------------
@@ -1247,31 +1142,6 @@ def _build_panel_widget():
         return box
 
     activity_box("VibeActivityTrace", "No provider tool calls yet.", 84)
-    activity_box("VibeActivityPending", "No pending actions.", 84)
-
-    action_row = QtWidgets.QWidget(activity)
-    action_row.setObjectName("VibeActionRow")
-    action_row_layout = QtWidgets.QHBoxLayout(action_row)
-    action_row_layout.setContentsMargins(0, 0, 0, 0)
-    action_row_layout.setSpacing(6)
-    action_selector = QtWidgets.QComboBox(action_row)
-    action_selector.setObjectName("VibeActionSelector")
-    action_selector.setSizePolicy(
-        QtWidgets.QSizePolicy.Expanding,
-        QtWidgets.QSizePolicy.Fixed,
-    )
-    approve_button = QtWidgets.QPushButton("Approve", action_row)
-    approve_button.setObjectName("VibeApproveAction")
-    approve_button.clicked.connect(_apply_selected_action)
-    reject_button = QtWidgets.QPushButton("Reject", action_row)
-    reject_button.setObjectName("VibeRejectAction")
-    reject_button.clicked.connect(_reject_selected_action)
-    action_row_layout.addWidget(action_selector, 1)
-    action_row_layout.addWidget(approve_button)
-    action_row_layout.addWidget(reject_button)
-    activity_layout.addWidget(action_row)
-
-    activity_box("VibeActivityHistory", "No approved or rejected actions yet.", 84)
 
     activity.setVisible(False)
     layout.addWidget(activity)

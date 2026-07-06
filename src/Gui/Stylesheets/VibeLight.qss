@@ -1222,8 +1222,7 @@ QLabel#VibePhasePill {
   border-radius: 12px;
   font-weight: bold; }
 
-QComboBox#VibeModeSelector,
-QComboBox#VibeActionSelector {
+QComboBox#VibeModeSelector {
   min-height: 24px;
   padding: 3px 28px 3px 9px;
   color: #1d2733;
@@ -1233,22 +1232,18 @@ QComboBox#VibeActionSelector {
   selection-background-color: #1864ab;
   selection-color: #ffffff; }
 
-QComboBox#VibeModeSelector:hover,
-QComboBox#VibeActionSelector:hover {
+QComboBox#VibeModeSelector:hover {
   border-color: #a8b3c0;
   background-color: #f8fafc; }
 
-QComboBox#VibeModeSelector:focus,
-QComboBox#VibeActionSelector:focus {
+QComboBox#VibeModeSelector:focus {
   border-color: #1c7ed6; }
 
 QPlainTextEdit#VibeConversation,
 QPlainTextEdit#VibeThinking,
 QPlainTextEdit#VibePrompt,
 QPlainTextEdit#VibeActivityAudit,
-QPlainTextEdit#VibeActivityTrace,
-QPlainTextEdit#VibeActivityPending,
-QPlainTextEdit#VibeActivityHistory {
+QPlainTextEdit#VibeActivityTrace {
   color: #1d2733;
   background-color: #fbfcfe;
   border: 1px solid #d6dce4;
@@ -1276,8 +1271,7 @@ QPlainTextEdit#VibePrompt:focus {
 QWidget#VibeComposer {
   padding: 8px; }
 
-QWidget#VibeComposerButtons,
-QWidget#VibeActionRow {
+QWidget#VibeComposerButtons {
   background-color: transparent;
   border: 0px solid transparent; }
 
@@ -1297,9 +1291,7 @@ QToolButton#VibeActivityToggle:checked {
 
 QPushButton#VibeSend,
 QPushButton#VibeStop,
-QPushButton#VibeAttachView,
-QPushButton#VibeApproveAction,
-QPushButton#VibeRejectAction {
+QPushButton#VibeAttachView {
   min-height: 26px;
   padding: 4px 12px;
   color: #1d2733;
@@ -1317,25 +1309,19 @@ QPushButton#VibeSend:hover {
   background-color: #1971c2; }
 
 QPushButton#VibeStop:hover,
-QPushButton#VibeAttachView:hover,
-QPushButton#VibeApproveAction:hover,
-QPushButton#VibeRejectAction:hover {
+QPushButton#VibeAttachView:hover {
   background-color: #dfe5ec;
   border-color: #a8b3c0; }
 
 QPushButton#VibeStop:pressed,
-QPushButton#VibeAttachView:pressed,
-QPushButton#VibeApproveAction:pressed,
-QPushButton#VibeRejectAction:pressed {
+QPushButton#VibeAttachView:pressed {
   color: #ffffff;
   background-color: #1864ab;
   border-color: #1971c2; }
 
 QPushButton#VibeSend:disabled,
 QPushButton#VibeStop:disabled,
-QPushButton#VibeAttachView:disabled,
-QPushButton#VibeApproveAction:disabled,
-QPushButton#VibeRejectAction:disabled {
+QPushButton#VibeAttachView:disabled {
   color: #a3aeba;
   background-color: #fbfcfe;
   border-color: #d6dce4; }

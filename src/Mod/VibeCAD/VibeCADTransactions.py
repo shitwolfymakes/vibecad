@@ -1,130 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Approval queue and transaction helpers for VibeCAD write tools."""
+"""Transaction helpers for VibeCAD write tools."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, Callable
-import itertools
 
 
 ActionHandler = Callable[[], dict[str, Any]]
 VerificationHandler = Callable[[dict[str, Any]], dict[str, Any]]
-
-
-@dataclass
-class ActionProposal:
-    id: str
-    title: str
-    description: str
-    safety: str
-    workbench: str | None
-    handler: ActionHandler
-    verifier: VerificationHandler | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "description": self.description,
-            "safety": self.safety,
-            "workbench": self.workbench,
-            "metadata": self.metadata,
-        }
-
-
-class ApprovalQueue:
-    def __init__(self) -> None:
-        self._counter = itertools.count(1)
-        self._pending: dict[str, ActionProposal] = {}
-        self._history: list[dict[str, Any]] = []
-
-    def propose(
-        self,
-        title: str,
-        description: str,
-        safety: str,
-        workbench: str | None,
-        handler: ActionHandler,
-        verifier: VerificationHandler | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        action_id = f"action-{next(self._counter)}"
-        proposal = ActionProposal(
-            id=action_id,
-            title=title,
-            description=description,
-            safety=safety,
-            workbench=workbench,
-            handler=handler,
-            verifier=verifier,
-            metadata=metadata or {},
-        )
-        self._pending[action_id] = proposal
-        return proposal.summary()
-
-    def pending(self) -> list[dict[str, Any]]:
-        return [proposal.summary() for proposal in self._pending.values()]
-
-    def history(self) -> list[dict[str, Any]]:
-        return list(self._history)
-
-    def clear(self) -> dict[str, Any]:
-        pending_count = len(self._pending)
-        history_count = len(self._history)
-        self._pending.clear()
-        self._history.clear()
-        return {
-            "cleared": True,
-            "pending_count": pending_count,
-            "history_count": history_count,
-        }
-
-    def last_applied(self) -> dict[str, Any] | None:
-        undone_ids = {
-            record.get("target_action_id")
-            for record in self._history
-            if record.get("status") == "undone"
-        }
-        for record in reversed(self._history):
-            if record.get("status") == "applied" and record.get("id") not in undone_ids:
-                return dict(record)
-        return None
-
-    def record_undo(self, action_id: str, title: str, result: dict[str, Any]) -> dict[str, Any]:
-        record = {
-            "id": f"undo-{action_id}",
-            "target_action_id": action_id,
-            "status": "undone" if result.get("ok") else "undo_failed",
-            "title": f"Undo: {title}",
-            "result": result,
-        }
-        self._history.append(record)
-        return record
-
-    def reject(self, action_id: str) -> dict[str, Any]:
-        proposal = self._pending.pop(action_id)
-        result = {
-            "id": action_id,
-            "status": "rejected",
-            "title": proposal.title,
-        }
-        self._history.append(result)
-        return result
-
-    def apply(self, action_id: str) -> dict[str, Any]:
-        proposal = self._pending.pop(action_id)
-        result = run_freecad_transaction(proposal.title, proposal.handler, proposal.verifier)
-        record = {
-            "id": action_id,
-            "status": "applied" if result.get("ok") else "failed",
-            "title": proposal.title,
-            "result": result,
-        }
-        self._history.append(record)
-        return record
 
 
 def run_freecad_transaction(

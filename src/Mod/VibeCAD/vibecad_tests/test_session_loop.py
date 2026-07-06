@@ -677,9 +677,6 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("core.propose_create_workbench_object", names)
         self.assertNotIn("core.propose_set_object_label", names)
         self.assertNotIn("core.propose_set_selected_property", names)
-        self.assertNotIn("core.list_pending_actions", names)
-        self.assertNotIn("core.apply_action", names)
-        self.assertNotIn("core.reject_action", names)
         self.assertNotIn("core.undo_last_vibecad_action", names)
         self.assertNotIn("core.clear_local_session", names)
         self.assertNotIn("core.run_workbench_command", names)
@@ -711,9 +708,6 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
 
         names = registered_tool_names()
         self.assertFalse([name for name in names if ".propose_" in name], names)
-        self.assertNotIn("core.list_pending_actions", names)
-        self.assertNotIn("core.apply_action", names)
-        self.assertNotIn("core.reject_action", names)
         self.assertNotIn("core.undo_last_vibecad_action", names)
         self.assertNotIn("core.clear_local_session", names)
 
@@ -1256,10 +1250,9 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
     def test_provider_tool_runner_blocks_direct_write_tools(self):
         service = VibeCADService()
         runner = make_provider_tool_runner(service)
-        blocked = runner("core.apply_action", '{"action_id": "action-1"}')
+        blocked = runner("core.undo_last_vibecad_action", "{}")
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["safety"], "write")
-        self.assertEqual(len(service.pending_actions()["pending"]), 0)
 
     def test_provider_tool_runner_blocks_out_of_scope_workbench_tools(self):
         service = VibeCADService()

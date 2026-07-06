@@ -9,10 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "build" / "release" / "Mod" / "VibeCAD"))
 
-import FreeCAD as App
-from PySide import QtCore, QtWidgets
+import FreeCAD as App  # noqa: E402
+from PySide import QtCore, QtWidgets  # noqa: E402
 
-from VibeCADCore import VibeCADService
+from VibeCADCore import VibeCADService  # noqa: E402
 
 
 def main() -> int:
@@ -58,8 +58,6 @@ def main() -> int:
             ("provider_tool_surface", service.provider_tool_surface),
             ("tool_shape_report", service.tool_shape_report),
             ("conversation", service.conversation_history),
-            ("pending_actions", service.pending_actions),
-            ("action_history", service.action_history),
             ("report_view_errors", service.report_view_errors),
         ]
         for name, func in checks:

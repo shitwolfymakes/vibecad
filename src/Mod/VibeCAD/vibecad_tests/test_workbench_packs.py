@@ -105,10 +105,7 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         service_only = service_names - provider_names
         allowed_service_only = {
             "core.activate_workbench",
-            "core.apply_action",
             "core.clear_local_session",
-            "core.list_pending_actions",
-            "core.reject_action",
             "core.run_workbench_command",
             "core.undo_last_vibecad_action",
         }

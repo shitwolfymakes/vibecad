@@ -25,7 +25,6 @@ from VibeCADProject import (
     vibecad_data_dir,
 )
 from VibeCADTools import SafetyLevel, ToolRegistry
-from VibeCADTransactions import ApprovalQueue
 from VibeCADWorkbenchTools import get_tool_pack, list_tool_packs
 from tool_impl import service as service_tools
 from tool_impl import sketcher as sketcher_tools
@@ -186,7 +185,6 @@ class VibeCADService:
     def __init__(self, dotenv_path: Path | None = None) -> None:
         self.dotenv_path = dotenv_path
         self._registry = ToolRegistry()
-        self._approvals = ApprovalQueue()
         self._last_view_screenshot: dict[str, Any] | None = None
         self._reference_images: list[dict[str, Any]] = []
         self._conversation_cache: list[dict[str, Any]] = []
@@ -201,10 +199,6 @@ class VibeCADService:
     @property
     def registry(self) -> ToolRegistry:
         return self._registry
-
-    @property
-    def approvals(self) -> ApprovalQueue:
-        return self._approvals
 
     def auth_state(self) -> AuthState:
         return resolve_auth_state(
@@ -2088,12 +2082,6 @@ class VibeCADService:
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
-    def pending_actions(self) -> dict[str, Any]:
-        return {"pending": self._registry.call("core.list_pending_actions")}
-
-    def action_history(self) -> dict[str, Any]:
-        return {"history": self._approvals.history()}
-
     def project_context(self) -> dict[str, Any]:
         return self._project_store.context()
 
@@ -2350,10 +2338,8 @@ class VibeCADService:
         return self._registry.call("core.get_report_view_errors")
 
     def clear_local_session(self) -> dict[str, Any]:
-        cleared = self._approvals.clear()
         self._steering_messages.clear()
         result = self._registry.call("core.clear_local_session")
-        result.update(cleared)
         return result
 
     def tool_shape_report(
@@ -2410,12 +2396,6 @@ class VibeCADService:
         return is_provider_safe_tool(
             self, tool_name, workbench or self.active_workbench_name()
         )
-
-    def reject_action(self, action_id: str) -> dict[str, Any]:
-        return self._registry.call("core.reject_action", action_id=action_id)
-
-    def apply_action(self, action_id: str) -> dict[str, Any]:
-        return self._registry.call("core.apply_action", action_id=action_id)
 
     def undo_last_vibecad_action(self) -> dict[str, Any]:
         return self._registry.call("core.undo_last_vibecad_action")
@@ -3066,8 +3046,6 @@ class VibeCADService:
             "provider_tool_surface": self.provider_tool_surface(),
             "tool_shape_report": self.tool_shape_report(),
             "conversation": self.conversation_history(),
-            "pending_actions": self.pending_actions(),
-            "action_history": self.action_history(),
             "report_view_errors": self.report_view_errors(),
         }
 

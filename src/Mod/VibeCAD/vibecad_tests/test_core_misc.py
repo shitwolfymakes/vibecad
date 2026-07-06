@@ -15,9 +15,6 @@ from VibeCADSession import (
     make_provider_tool_runner,
     run_prompt,
 )
-from VibeCADTransactions import (
-    ApprovalQueue,
-)
 
 from vibecad_tests.support import (
     SettingsSnapshotTestCase,
@@ -112,24 +109,6 @@ class TestVibeCADCoreMisc(SettingsSnapshotTestCase):
         result = VibeCADService().activate_workbench("NoSuchWorkbench")
         self.assertIn("activated", result)
         self.assertIn("requested", result)
-
-    def test_missing_action_apply_is_reported(self):
-        result = VibeCADService().apply_action("missing")
-        self.assertEqual(result["status"], "missing")
-
-    def test_approval_queue_apply_runs_handler(self):
-        queue = ApprovalQueue()
-        proposal = queue.propose(
-            "test",
-            "test proposal",
-            "safe_write",
-            None,
-            lambda: {"changed": True},
-        )
-        result = queue.apply(proposal["id"])
-        self.assertEqual(result["status"], "applied")
-        self.assertEqual(result["result"]["result"]["changed"], True)
-        self.assertTrue(result["result"]["verification"]["ok"])
 
     def test_agents_provider_fails_cleanly_when_sdk_missing(self):
         try:

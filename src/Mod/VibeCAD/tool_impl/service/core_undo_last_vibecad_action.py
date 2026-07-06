@@ -5,40 +5,44 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Undo the most recent applied VibeCAD action via the document undo '
+TOOL_SPEC = {'description': 'Undo the most recent transaction on the active document undo '
                 'stack; for removing a specific older object use core.delete_object.',
  'name': 'core.undo_last_vibecad_action',
  'safety': 'WRITE'}
 
 
 def run(service, **kwargs):
-    action = service.approvals.last_applied()
-    if action is None:
-        return {
-            "id": None,
-            "status": "missing",
-            "ok": False,
-            "error": "No applied VibeCAD action is available to undo.",
-        }
     try:
         import FreeCAD as App
-    except Exception as exc:
-        result = {"ok": False, "error": f"FreeCAD unavailable: {exc}"}
-        return service.approvals.record_undo(action["id"], action.get("title", "VibeCAD action"), result)
+    except ImportError as exc:
+        return {"ok": False, "error": f"FreeCAD unavailable: {exc}"}
 
     doc = App.ActiveDocument
     if doc is None or not hasattr(doc, "undo"):
-        result = {"ok": False, "error": "No active FreeCAD document can be undone."}
-    else:
-        try:
-            doc.undo()
-            if hasattr(doc, "recompute"):
-                doc.recompute()
-            result = {
-                "ok": True,
-                "undone_action_id": action["id"],
-                "document": getattr(doc, "Name", None),
-            }
-        except Exception as exc:
-            result = {"ok": False, "error": str(exc)}
-    return service.approvals.record_undo(action["id"], action.get("title", "VibeCAD action"), result)
+        return {"ok": False, "error": "No active FreeCAD document can be undone."}
+
+    undo_names = list(getattr(doc, "UndoNames", []) or [])
+    if not undo_names and not int(getattr(doc, "UndoCount", 0) or 0):
+        return {
+            "ok": False,
+            "error": "The document undo stack is empty; nothing to undo.",
+            "document": getattr(doc, "Name", None),
+        }
+
+    undone_transaction = undo_names[0] if undo_names else None
+    try:
+        doc.undo()
+        if hasattr(doc, "recompute"):
+            doc.recompute()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "document": getattr(doc, "Name", None),
+        }
+    return {
+        "ok": True,
+        "undone_transaction": undone_transaction,
+        "document": getattr(doc, "Name", None),
+        "remaining_undo_count": int(getattr(doc, "UndoCount", 0) or 0),
+    }

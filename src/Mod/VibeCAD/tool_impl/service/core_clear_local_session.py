@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 
-TOOL_SPEC = {'description': 'Clear local VibeCAD pending actions, action history, attached '
-                'viewport screenshot metadata, and user reference images.',
+TOOL_SPEC = {'description': 'Clear the local VibeCAD conversation, attached viewport '
+                'screenshot metadata, and user reference images.',
  'name': 'core.clear_local_session',
  'safety': 'WRITE'}
 

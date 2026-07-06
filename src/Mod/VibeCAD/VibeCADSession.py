@@ -123,9 +123,6 @@ DOCUMENT_MANAGEMENT_TOOLS = {
 }
 
 PROVIDER_QUEUE_TOOLS = {
-    "core.list_pending_actions",
-    "core.apply_action",
-    "core.reject_action",
     "core.undo_last_vibecad_action",
     "core.clear_local_session",
 }
