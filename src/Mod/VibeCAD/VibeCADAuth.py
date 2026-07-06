@@ -42,6 +42,21 @@ class ProviderSpec:
             }
         return {"Authorization": f"Bearer {api_key}"}
 
+    def models_url_for(self, base_url: str | None = None) -> str:
+        """Return the models endpoint URL, honoring an optional base URL override.
+
+        Follows each SDK's base-URL convention: OpenAI base URLs include the
+        ``/v1`` segment (e.g. ``http://localhost:8000/v1``), while Anthropic
+        base URLs do not (e.g. ``https://api.anthropic.com``).
+        """
+
+        clean = (base_url or "").strip().rstrip("/")
+        if not clean:
+            return self.models_url
+        if self.provider_id == "anthropic":
+            return f"{clean}/v1/models"
+        return f"{clean}/models"
+
 
 PROVIDERS: dict[str, ProviderSpec] = {
     "openai": ProviderSpec(
@@ -234,6 +249,7 @@ def validate_api_key(
     source: str | None = None,
     timeout_seconds: float = 10.0,
     opener: Any | None = None,
+    base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
     clean = (api_key or "").strip()
@@ -245,7 +261,7 @@ def validate_api_key(
         )
 
     http_request = request.Request(
-        spec.models_url,
+        spec.models_url_for(base_url),
         headers=spec.auth_headers(clean),
         method="GET",
     )
@@ -321,6 +337,7 @@ def validate_configured_auth(
     dotenv_path: Path | None = None,
     timeout_seconds: float = 10.0,
     opener: Any | None = None,
+    base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
     credential = resolve_auth_credential(
@@ -337,6 +354,7 @@ def validate_configured_auth(
         source=credential.source,
         timeout_seconds=timeout_seconds,
         opener=opener,
+        base_url=base_url,
     )
 
 
@@ -380,6 +398,7 @@ def list_provider_models(
     timeout_seconds: float = 15.0,
     opener: Any | None = None,
     max_pages: int = 10,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     """Query the provider's models endpoint.
 
@@ -399,9 +418,10 @@ def list_provider_models(
     open_call = opener or request.urlopen
     models: list[str] = []
     after_id: str | None = None
+    models_url = spec.models_url_for(base_url)
     try:
         for _ in range(max_pages):
-            url = spec.models_url
+            url = models_url
             if spec.provider_id == "anthropic":
                 params = {"limit": "100"}
                 if after_id:

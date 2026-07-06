@@ -233,6 +233,13 @@ class VibeCADService:
         except Exception:
             return "gpt-5.5"
 
+    def provider_base_url(self) -> str | None:
+        """Base URL override for the selected provider, or None for official."""
+        try:
+            return load_settings().base_url_for(self.provider_name())
+        except Exception:
+            return None
+
     def provider_reasoning_effort(self) -> str:
         try:
             return load_settings().reasoning_effort

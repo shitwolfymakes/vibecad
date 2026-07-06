@@ -51,6 +51,8 @@ class VibeCADSettings:
     provider: str = DEFAULT_PROVIDER
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
     enable_build_script: bool = False
+    openai_base_url: str = ""
+    anthropic_base_url: str = ""
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
@@ -64,6 +66,23 @@ class VibeCADSettings:
         if normalize_provider(self.provider) == "anthropic":
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         return self.model.strip() or DEFAULT_MODEL
+
+    @property
+    def active_base_url(self) -> str | None:
+        """Base URL override for the selected provider; None means official endpoint."""
+        if normalize_provider(self.provider) == "anthropic":
+            override = self.anthropic_base_url.strip()
+        else:
+            override = self.openai_base_url.strip()
+        return override or None
+
+    def base_url_for(self, provider: str) -> str | None:
+        """Base URL override for ``provider``; None means official endpoint."""
+        if normalize_provider(provider) == "anthropic":
+            override = self.anthropic_base_url.strip()
+        else:
+            override = self.openai_base_url.strip()
+        return override or None
 
 
 def preferences():
@@ -105,6 +124,8 @@ def load_settings() -> VibeCADSettings:
         anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
         or DEFAULT_ANTHROPIC_MODEL,
         enable_build_script=pref.GetBool("EnableBuildScript", False),
+        openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
+        anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
     )
 
 
@@ -125,6 +146,8 @@ def save_settings(settings: VibeCADSettings) -> None:
         "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
     )
     pref.SetBool("EnableBuildScript", bool(settings.enable_build_script))
+    pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
+    pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
 
 
 def reset_settings() -> None:
@@ -137,6 +160,8 @@ def reset_settings() -> None:
     pref.RemString("Provider")
     pref.RemString("AnthropicModel")
     pref.RemBool("EnableBuildScript")
+    pref.RemString("OpenAIBaseUrl")
+    pref.RemString("AnthropicBaseUrl")
 
 
 def configured_dotenv_path() -> Path | None:
@@ -150,6 +175,7 @@ def configured_dotenv_path() -> Path | None:
 def fetch_models_for_provider(
     provider: str,
     dotenv_path: Path | None = None,
+    base_url: str | None = None,
 ) -> dict:
     """Resolve the configured key for ``provider`` and query its models endpoint.
 
@@ -167,7 +193,9 @@ def fetch_models_for_provider(
             "models": [],
             "error": f"No {display} API key is configured.",
         }
-    return list_provider_models(credential.value, provider=clean_provider)
+    return list_provider_models(
+        credential.value, provider=clean_provider, base_url=base_url
+    )
 
 
 class VibeCADPreferencesPage:
@@ -199,6 +227,25 @@ class VibeCADPreferencesPage:
         self.anthropic_model.setObjectName("VibeCADPrefAnthropicModel")
         self.anthropic_model.setEditable(True)
         layout.addRow("Anthropic model", self.anthropic_model)
+
+        self.openai_base_url = QtWidgets.QLineEdit(self.form)
+        self.openai_base_url.setObjectName("VibeCADPrefOpenAIBaseUrl")
+        self.openai_base_url.setPlaceholderText("https://api.openai.com/v1")
+        self.openai_base_url.setToolTip(
+            "Override the OpenAI API endpoint (include the /v1 segment). "
+            "Leave blank to use the official endpoint. Use this to point at "
+            "a local or OpenAI-compatible server."
+        )
+        layout.addRow("OpenAI base URL", self.openai_base_url)
+
+        self.anthropic_base_url = QtWidgets.QLineEdit(self.form)
+        self.anthropic_base_url.setObjectName("VibeCADPrefAnthropicBaseUrl")
+        self.anthropic_base_url.setPlaceholderText("https://api.anthropic.com")
+        self.anthropic_base_url.setToolTip(
+            "Override the Anthropic API endpoint (without the /v1 segment). "
+            "Leave blank to use the official endpoint."
+        )
+        layout.addRow("Anthropic base URL", self.anthropic_base_url)
 
         self.fetch_models = QtWidgets.QPushButton("Fetch models", self.form)
         self.fetch_models.setObjectName("VibeCADPrefFetchModels")
@@ -301,7 +348,9 @@ class VibeCADPreferencesPage:
         provider = self._selected_provider()
         settings = self._current_settings()
         result = fetch_models_for_provider(
-            provider, dotenv_path=settings.resolved_dotenv_path
+            provider,
+            dotenv_path=settings.resolved_dotenv_path,
+            base_url=settings.base_url_for(provider),
         )
         if not result["ok"]:
             self.status.setText(f"models_error | {result['error']}")
@@ -333,15 +382,21 @@ class VibeCADPreferencesPage:
     def _validate_auth(self) -> None:
         provider = self._selected_provider()
         typed_key = self.api_key.text().strip()
+        settings = self._current_settings()
+        base_url = settings.base_url_for(provider)
         if typed_key:
             auth = validate_api_key(
-                typed_key, provider=provider, source="unsaved API key"
+                typed_key,
+                provider=provider,
+                source="unsaved API key",
+                base_url=base_url,
             )
             self.api_key.clear()
         else:
             auth = validate_configured_auth(
                 provider=provider,
-                dotenv_path=self._current_settings().resolved_dotenv_path,
+                dotenv_path=settings.resolved_dotenv_path,
+                base_url=base_url,
             )
         source = f" | {auth.source}" if auth.source else ""
         key = f" | {auth.redacted_key}" if auth.redacted_key else ""
@@ -368,6 +423,8 @@ class VibeCADPreferencesPage:
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
             enable_build_script=self.enable_build_script.isChecked(),
+            openai_base_url=self.openai_base_url.text().strip(),
+            anthropic_base_url=self.anthropic_base_url.text().strip(),
         )
 
     def _refresh_status(self) -> None:
@@ -396,6 +453,8 @@ class VibeCADPreferencesPage:
         self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
         self.dotenv_path.setText(settings.dotenv_path)
         self.enable_build_script.setChecked(settings.enable_build_script)
+        self.openai_base_url.setText(settings.openai_base_url)
+        self.anthropic_base_url.setText(settings.anthropic_base_url)
         disabled = set(settings.disabled_workbenches)
         for index in range(self.tool_packs.count()):
             item = self.tool_packs.item(index)

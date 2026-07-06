@@ -214,21 +214,71 @@ def _image_file_uri(raw_path: str) -> str | None:
         return None
 
 
+def _html_body_fragment(document_html: str) -> str:
+    lower = document_html.lower()
+    start = lower.find("<body")
+    if start < 0:
+        return document_html
+    start = lower.find(">", start)
+    if start < 0:
+        return document_html
+    end = lower.rfind("</body>")
+    if end < 0:
+        end = len(document_html)
+    return document_html[start + 1 : end]
+
+
+def _markdown_fragment_html(markdown_text: str) -> str:
+    try:
+        from PySide import QtGui
+
+        features = (
+            QtGui.QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+            | QtGui.QTextDocument.MarkdownFeature.MarkdownNoHTML
+        )
+        fragment = QtGui.QTextDocumentFragment.fromMarkdown(
+            str(markdown_text or ""),
+            features,
+        )
+        return _html_body_fragment(fragment.toHtml())
+    except Exception:
+        escaped = html.escape(str(markdown_text or "")).replace("\n", "<br/>")
+        return f'<p style="white-space:pre-wrap;">{escaped}</p>'
+
+
+def _split_transcript_role(text: str) -> tuple[str | None, str]:
+    raw = str(text or "")
+    first, separator, rest = raw.partition("\n")
+    if separator and first.endswith(":") and 1 <= len(first) <= 48:
+        return first[:-1], rest
+    return None, raw
+
+
 def _transcript_block_html(text: str, image_paths: list[str] | None = None) -> str:
-    """Render one conversation turn as HTML: escaped text plus thumbnails.
+    """Render one conversation turn as markdown-backed HTML plus thumbnails.
 
     Missing or unreadable image files degrade to text-only output.
     """
-    escaped = html.escape(str(text)).replace("\n", "<br/>")
-    parts = [f'<p style="white-space:pre-wrap;">{escaped}</p>']
+    role, body = _split_transcript_role(str(text))
+    parts = ['<div style="margin:0 0 10px 0;">']
+    if role:
+        parts.append(
+            '<p style="margin:0 0 4px 0; font-weight:700;">'
+            f"{html.escape(role)}:"
+            "</p>"
+        )
+    parts.append('<div style="margin:0;">')
+    parts.append(_markdown_fragment_html(body))
+    parts.append("</div>")
     for raw in image_paths or []:
         uri = _image_file_uri(raw)
         if uri is None:
             continue
         parts.append(
-            f'<p><img src="{html.escape(uri, quote=True)}" '
+            f'<p style="margin:6px 0 0 0;"><img src="{html.escape(uri, quote=True)}" '
             f'width="{TRANSCRIPT_THUMBNAIL_WIDTH}"/></p>'
         )
+    parts.append("</div>")
     return "".join(parts)
 
 
@@ -434,6 +484,17 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "Looking at the current FreeCAD document..."
     if name == "context_build_completed":
         return "I have the document context."
+    if name == "provider_subprocess_started":
+        return (
+            f"{event.get('provider', 'Provider')} process started"
+            + (f" | pid {event.get('pid')}" if event.get("pid") else "")
+        )
+    if name == "provider_waiting":
+        return (
+            f"Waiting on {event.get('provider', 'provider')} response..."
+            f" | idle {float(event.get('idle_seconds', 0) or 0):.1f}s"
+            f" | total {float(event.get('elapsed_seconds', 0) or 0):.1f}s"
+        )
     if name == "provider_turn_started":
         base = "Thinking about the next CAD move..."
         delta = _format_document_delta(event.get("document_delta"))
@@ -442,6 +503,8 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return base
     if name == "provider_turn_completed":
         return "CAD step completed."
+    if name == "provider_turn_output":
+        return f"VibeCAD wrote turn {event.get('turn', '?')}."
     if name == "provider_turn_failed":
         return (
             f"Provider turn {event.get('turn', '?')} failed: "
@@ -456,6 +519,92 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "Run stopped by user."
     if name == "human_steering_consumed":
         return "Applied your latest correction."
+    if name == "anthropic_request_dumped":
+        return (
+            f"Anthropic request dump written: {event.get('dump_path')}"
+            if event.get("dump_path")
+            else "Anthropic request dump written."
+        )
+    if name == "anthropic_request_started":
+        thinking = event.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("budget_tokens"):
+            thinking_text = f", thinking {thinking['budget_tokens']} tokens"
+        elif isinstance(thinking, dict) and thinking.get("type"):
+            thinking_text = f", thinking {thinking['type']}"
+        else:
+            thinking_text = ""
+        return (
+            f"Anthropic request sent: turn {event.get('turn', '?')}, "
+            f"{event.get('message_count', 0)} messages, "
+            f"{event.get('tool_count', 0)} tools{thinking_text}"
+        )
+    if name == "anthropic_request_retried":
+        return "Anthropic request retried with adaptive thinking."
+    if name == "anthropic_stream_waiting":
+        return f"Anthropic stream opened: waiting for turn {event.get('turn', '?')}."
+    if name == "anthropic_stream_event":
+        stream_type = str(event.get("stream_event_type") or "event")
+        if stream_type == "content_block_start":
+            block = str(event.get("block_type") or "block")
+            tool = event.get("tool_name")
+            return (
+                f"Anthropic stream: started {block}"
+                + (f" {tool}" if tool else "")
+            )
+        if stream_type == "content_block_stop":
+            return "Anthropic stream: finished content block."
+        if stream_type == "message_delta" and event.get("stop_reason"):
+            return f"Anthropic stream: stop reason {event['stop_reason']}."
+        if stream_type == "message_stop":
+            return "Anthropic stream: message complete."
+        if event.get("delta_type"):
+            return f"Anthropic stream: receiving {event['delta_type']}."
+        return f"Anthropic stream: {stream_type}."
+    if name == "anthropic_stream_completed":
+        return (
+            f"Anthropic stream completed: {event.get('event_count', 0)} events."
+        )
+    if name == "anthropic_response_received":
+        counts = event.get("block_counts")
+        if isinstance(counts, dict) and counts:
+            blocks = ", ".join(
+                f"{key}={value}" for key, value in sorted(counts.items())
+            )
+        else:
+            blocks = "no content blocks"
+        tools = event.get("tool_names")
+        tool_text = ""
+        if isinstance(tools, list) and tools:
+            joined = ", ".join(str(tool) for tool in tools[:4])
+            remaining = int(event.get("tool_name_count", len(tools)) or len(tools))
+            suffix = f" +{remaining - 4}" if remaining > 4 else ""
+            tool_text = f" | wants {joined}{suffix}"
+        return (
+            f"Anthropic response: stop={event.get('stop_reason', 'unknown')}; "
+            f"{blocks}{tool_text}"
+        )
+    if name == "provider_tool_requested":
+        arguments = event.get("arguments")
+        arg_text = ""
+        if isinstance(arguments, dict):
+            keys = arguments.get("keys")
+            if isinstance(keys, list) and keys:
+                arg_text = " | args: " + ", ".join(str(key) for key in keys[:6])
+            elif arguments.get("key_count") == 0:
+                arg_text = " | args: none"
+            elif arguments.get("valid_json") is False:
+                arg_text = " | args: invalid JSON"
+        return (
+            f"{event.get('provider', 'Provider')} requested CAD tool: "
+            f"{event.get('tool_name', 'unknown')}{arg_text}"
+        )
+    if name == "provider_tool_result_sent":
+        status = "ok" if event.get("ok") else "blocked"
+        detail = f" | {event.get('error')}" if event.get("error") else ""
+        return (
+            f"Provider received CAD tool result: "
+            f"{event.get('tool_name', 'unknown')} {status}{detail}"
+        )
     if name == "tool_call_completed":
         status = "ok" if event.get("ok") else "blocked"
         result = event.get("result", {}) if isinstance(event.get("result"), dict) else {}
@@ -837,6 +986,7 @@ def _run_prompt_from_panel() -> None:
     _append_thinking("Starting.")
     prompt_box.clear()
     live_tool_trace: list[dict[str, Any]] = []
+    displayed_provider_texts: list[str] = []
 
     def _cancelled() -> bool:
         return _assistant_run_controller.is_cancelled(run_id)
@@ -849,6 +999,7 @@ def _run_prompt_from_panel() -> None:
         ]
 
     def _progress(event: dict[str, Any]) -> None:
+        nonlocal displayed_provider_texts
         _render_assistant_run_state(dock)
         if event.get("event") == "tool_call_completed":
             live_tool_trace.append(
@@ -860,6 +1011,11 @@ def _run_prompt_from_panel() -> None:
                     "result": event.get("result", {}),
                 }
             )
+        if event.get("event") == "provider_turn_output":
+            text = str(event.get("text") or "").strip()
+            if text:
+                displayed_provider_texts.append(text)
+                _append_conversation("VibeCAD", text)
         _handle_progress_event(dock, event, live_tool_trace)
 
     try:
@@ -873,7 +1029,15 @@ def _run_prompt_from_panel() -> None:
             steering_check=_steering_messages,
         )
         error = f"\nProvider note: {response.error}" if response.error else ""
-        _append_conversation("VibeCAD", f"{response.final_output}{error}")
+        final_text = str(response.final_output or "").strip()
+        displayed_text = "\n\n".join(displayed_provider_texts).strip()
+        undisplayed_tail = ""
+        if displayed_text and final_text.startswith(displayed_text):
+            undisplayed_tail = final_text[len(displayed_text) :].strip()
+        elif not displayed_text:
+            undisplayed_tail = final_text
+        if undisplayed_tail or error:
+            _append_conversation("VibeCAD", f"{undisplayed_tail}{error}".strip())
         _set_tool_trace(response.tool_trace)
     except Exception as exc:
         _append_conversation(
@@ -885,7 +1049,6 @@ def _run_prompt_from_panel() -> None:
     finally:
         _assistant_run_controller.finish(run_id)
         _clear_thinking(dock)
-        _render_saved_conversation(dock)
         _render_assistant_run_state(dock)
         _refresh_activity(dock)
 

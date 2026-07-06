@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import json
 import os
 import time
@@ -382,6 +383,7 @@ def choose_provider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
             reasoning_effort=service.provider_reasoning_effort(),
+            base_url=service.provider_base_url(),
         )
     return OfflineProvider()
 
@@ -392,18 +394,19 @@ def _run_provider_with_optional_cancellation(
     context: dict[str, Any],
     tool_runner: Callable[[str, str], dict[str, Any]],
     cancellation_check: CancellationCheck | None,
+    progress_callback: ProgressCallback | None,
 ):
-    try:
-        return provider.run(
-            prompt,
-            context,
-            tool_runner=tool_runner,
-            cancellation_check=cancellation_check,
-        )
-    except TypeError as exc:
-        if "cancellation_check" not in str(exc):
-            raise
-        return provider.run(prompt, context, tool_runner=tool_runner)
+    parameters = inspect.signature(provider.run).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs: dict[str, Any] = {"tool_runner": tool_runner}
+    if accepts_kwargs or "cancellation_check" in parameters:
+        kwargs["cancellation_check"] = cancellation_check
+    if accepts_kwargs or "progress_callback" in parameters:
+        kwargs["progress_callback"] = progress_callback
+    return provider.run(prompt, context, **kwargs)
 
 
 def run_prompt(
@@ -560,6 +563,7 @@ def run_prompt(
                     context,
                     tool_runner,
                     cancellation_check,
+                    progress_callback,
                 )
             except ProviderUnavailable as exc:
                 if turn_started_with_visual_feedback:
@@ -610,7 +614,18 @@ def run_prompt(
                 )
                 turn_index += 1
                 continue
-            outputs.append(result.final_output)
+            turn_output = str(result.final_output or "").strip()
+            if turn_output:
+                outputs.append(turn_output)
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "provider_turn_output",
+                        "provider": provider_name,
+                        "turn": turn_index + 1,
+                        "text": turn_output,
+                    },
+                )
             if turn_started_with_visual_feedback:
                 visual_feedback_consumed = True
             entered_workspace = _workspace_session_from_trace(
@@ -663,7 +678,7 @@ def run_prompt(
                 )
                 unresolved_signature = (
                     post_turn_missing,
-                    result.final_output.strip().lower(),
+                    turn_output.strip().lower(),
                     turn_tool_names,
                 )
                 if unresolved_signature == unresolved_turn_signature:
@@ -684,7 +699,7 @@ def run_prompt(
                 unresolved_turn_repeat_count = 0
             if not _should_continue_autonomously(
                 clean_prompt,
-                result.final_output,
+                turn_output,
                 active_service,
                 tool_trace,
                 turn_index,
@@ -1486,7 +1501,7 @@ def _continuation_prompt(
             "",
             f"Original user request: {prompt}",
             "",
-            "Previous assistant output:",
+            "Previous assistant checkpoint output (context only; do not restate it):",
             outputs[-1],
             "",
             "Recent tool trace:",
@@ -1521,10 +1536,13 @@ def _continuation_prompt(
             "Live user steering messages:",
             "\n".join(steering_lines) or "- none",
             "",
-            "Proceed with the next feature in the brief's plan. Tool errors are "
-            "secondary to design correctness: recover from failures using the "
-            "current document state, but never let a retry replace a curved "
-            "functional surface with a simpler wrong shape.",
+            "Proceed with the next feature in the brief's plan. Do not repeat "
+            "prior progress or the original brief in the user-facing answer; "
+            "report only the new delta from this turn and the next immediate "
+            "CAD action. Tool errors are secondary to design correctness: "
+            "recover from failures using the current document state, but never "
+            "let a retry replace a curved functional surface with a simpler "
+            "wrong shape.",
         ]
     )
 

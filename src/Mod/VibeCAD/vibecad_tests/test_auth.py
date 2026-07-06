@@ -177,6 +177,126 @@ class TestVibeCADAuth(unittest.TestCase):
             else:
                 sys.modules["keyring"] = original
 
+    def test_models_url_for_derives_provider_specific_endpoints(self):
+        openai = provider_spec("openai")
+        anthropic = provider_spec("anthropic")
+
+        # Blank/None overrides fall back to the official endpoints.
+        self.assertEqual(openai.models_url_for(None), "https://api.openai.com/v1/models")
+        self.assertEqual(openai.models_url_for(""), "https://api.openai.com/v1/models")
+        self.assertEqual(
+            openai.models_url_for("   "), "https://api.openai.com/v1/models"
+        )
+        self.assertEqual(
+            anthropic.models_url_for(None), "https://api.anthropic.com/v1/models"
+        )
+
+        # OpenAI convention: base URL includes the /v1 segment.
+        self.assertEqual(
+            openai.models_url_for("http://localhost:8000/v1"),
+            "http://localhost:8000/v1/models",
+        )
+        self.assertEqual(
+            openai.models_url_for("http://localhost:8000/v1/"),
+            "http://localhost:8000/v1/models",
+        )
+
+        # Anthropic convention: base URL excludes the /v1 segment.
+        self.assertEqual(
+            anthropic.models_url_for("http://localhost:9000"),
+            "http://localhost:9000/v1/models",
+        )
+        self.assertEqual(
+            anthropic.models_url_for("http://localhost:9000/"),
+            "http://localhost:9000/v1/models",
+        )
+
+    def test_validate_api_key_requests_overridden_base_url(self):
+        seen = []
+
+        def opener(http_request, timeout=None):
+            seen.append(http_request)
+            return FakeHTTPResponse(200)
+
+        state = validate_api_key(
+            "sk-test123456",
+            provider="openai",
+            timeout_seconds=0.5,
+            opener=opener,
+            base_url="http://localhost:8000/v1",
+        )
+        self.assertEqual(state.status, AuthStatus.VERIFIED)
+        self.assertEqual(seen[0].full_url, "http://localhost:8000/v1/models")
+        self.assertEqual(seen[0].headers["Authorization"], "Bearer sk-test123456")
+
+        state = validate_api_key(
+            "sk-ant-test123456",
+            provider="anthropic",
+            timeout_seconds=0.5,
+            opener=opener,
+            base_url="http://localhost:9000/",
+        )
+        self.assertEqual(state.status, AuthStatus.VERIFIED)
+        self.assertEqual(seen[1].full_url, "http://localhost:9000/v1/models")
+        self.assertEqual(seen[1].headers["X-api-key"], "sk-ant-test123456")
+
+    def test_validate_configured_auth_forwards_base_url(self):
+        seen = []
+
+        def opener(http_request, timeout=None):
+            seen.append(http_request)
+            return FakeHTTPResponse(200)
+
+        state = validate_configured_auth(
+            provider="openai",
+            env={"OPENAI_API_KEY": "sk-test123456"},
+            timeout_seconds=0.5,
+            opener=opener,
+            base_url="http://localhost:8000/v1",
+        )
+        self.assertEqual(state.status, AuthStatus.VERIFIED)
+        self.assertEqual(seen[0].full_url, "http://localhost:8000/v1/models")
+
+    def test_list_provider_models_requests_overridden_base_url(self):
+        openai_urls = []
+
+        def openai_opener(http_request, timeout=None):
+            openai_urls.append(http_request.full_url)
+            return FakeJSONResponse({"data": [{"id": "local-model"}]})
+
+        payload = list_provider_models(
+            "sk-test123456",
+            provider="openai",
+            opener=openai_opener,
+            base_url="http://localhost:8000/v1",
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["models"], ["local-model"])
+        self.assertEqual(openai_urls, ["http://localhost:8000/v1/models"])
+
+        pages = [
+            {"data": [{"id": "claude-local"}], "has_more": True, "last_id": "claude-local"},
+            {"data": [{"id": "claude-local-2"}], "has_more": False},
+        ]
+        anthropic_urls = []
+
+        def anthropic_opener(http_request, timeout=None):
+            anthropic_urls.append(http_request.full_url)
+            return FakeJSONResponse(pages[len(anthropic_urls) - 1])
+
+        payload = list_provider_models(
+            "sk-ant-test123456",
+            provider="anthropic",
+            opener=anthropic_opener,
+            base_url="http://localhost:9000",
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["models"], ["claude-local", "claude-local-2"])
+        self.assertEqual(len(anthropic_urls), 2)
+        for url in anthropic_urls:
+            self.assertTrue(url.startswith("http://localhost:9000/v1/models?"))
+        self.assertIn("after_id=claude-local", anthropic_urls[1])
+
     def test_provider_registry_covers_openai_and_anthropic(self):
         self.assertEqual(set(PROVIDERS), {"openai", "anthropic"})
         spec = provider_spec("anthropic")

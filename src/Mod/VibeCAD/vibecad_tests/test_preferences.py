@@ -51,6 +51,8 @@ class TestVibeCADPreferences(unittest.TestCase):
             "AnthropicModel", DEFAULT_ANTHROPIC_MODEL
         )
         self._old_enable_build_script = self._pref.GetBool("EnableBuildScript", False)
+        self._old_openai_base_url = self._pref.GetString("OpenAIBaseUrl", "")
+        self._old_anthropic_base_url = self._pref.GetString("AnthropicBaseUrl", "")
 
     def tearDown(self):
         save_settings(
@@ -67,6 +69,8 @@ class TestVibeCADPreferences(unittest.TestCase):
                 provider=self._old_provider,
                 anthropic_model=self._old_anthropic_model,
                 enable_build_script=self._old_enable_build_script,
+                openai_base_url=self._old_openai_base_url,
+                anthropic_base_url=self._old_anthropic_base_url,
             )
         )
 
@@ -153,6 +157,58 @@ class TestVibeCADPreferences(unittest.TestCase):
         self.assertEqual(settings.provider, "openai")
         self.assertEqual(settings.anthropic_model, DEFAULT_ANTHROPIC_MODEL)
 
+    def test_preferences_persist_and_reset_base_urls(self):
+        save_settings(
+            VibeCADSettings(
+                openai_base_url="http://localhost:8000/v1",
+                anthropic_base_url="http://localhost:9000",
+            )
+        )
+        settings = load_settings()
+        self.assertEqual(settings.openai_base_url, "http://localhost:8000/v1")
+        self.assertEqual(settings.anthropic_base_url, "http://localhost:9000")
+
+        reset_settings()
+        settings = load_settings()
+        self.assertEqual(settings.openai_base_url, "")
+        self.assertEqual(settings.anthropic_base_url, "")
+        self.assertIsNone(settings.active_base_url)
+
+    def test_active_base_url_and_base_url_for_normalize_blank_values(self):
+        blank = VibeCADSettings()
+        self.assertIsNone(blank.active_base_url)
+        self.assertIsNone(blank.base_url_for("openai"))
+        self.assertIsNone(blank.base_url_for("anthropic"))
+
+        whitespace = VibeCADSettings(
+            openai_base_url="   ", anthropic_base_url="\t"
+        )
+        self.assertIsNone(whitespace.active_base_url)
+        self.assertIsNone(whitespace.base_url_for("openai"))
+        self.assertIsNone(whitespace.base_url_for("anthropic"))
+
+        configured = VibeCADSettings(
+            provider="openai",
+            openai_base_url=" http://localhost:8000/v1 ",
+            anthropic_base_url="http://localhost:9000",
+        )
+        self.assertEqual(configured.active_base_url, "http://localhost:8000/v1")
+        self.assertEqual(
+            configured.base_url_for("openai"), "http://localhost:8000/v1"
+        )
+        self.assertEqual(
+            configured.base_url_for("anthropic"), "http://localhost:9000"
+        )
+
+        anthropic_selected = VibeCADSettings(
+            provider="anthropic",
+            openai_base_url="http://localhost:8000/v1",
+            anthropic_base_url="http://localhost:9000",
+        )
+        self.assertEqual(
+            anthropic_selected.active_base_url, "http://localhost:9000"
+        )
+
     def test_fetch_models_for_provider_reports_missing_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             empty_env = Path(tmp) / ".env"
@@ -188,15 +244,26 @@ class TestVibeCADPreferences(unittest.TestCase):
             try:
                 os.environ.pop("ANTHROPIC_API_KEY", None)
 
-                def fake_list(api_key, *, provider="openai", **_kwargs):
-                    calls.append((api_key, provider))
+                def fake_list(api_key, *, provider="openai", **kwargs):
+                    calls.append((api_key, provider, kwargs.get("base_url")))
                     return {"ok": True, "models": ["claude-sonnet-5"], "error": None}
 
                 VibeCADPreferences.list_provider_models = fake_list
                 payload = fetch_models_for_provider("anthropic", dotenv_path=env_path)
                 self.assertTrue(payload["ok"])
                 self.assertEqual(payload["models"], ["claude-sonnet-5"])
-                self.assertEqual(calls, [("sk-ant-key1234", "anthropic")])
+                self.assertEqual(calls, [("sk-ant-key1234", "anthropic", None)])
+
+                payload = fetch_models_for_provider(
+                    "anthropic",
+                    dotenv_path=env_path,
+                    base_url="http://localhost:9000",
+                )
+                self.assertTrue(payload["ok"])
+                self.assertEqual(
+                    calls[-1],
+                    ("sk-ant-key1234", "anthropic", "http://localhost:9000"),
+                )
             finally:
                 VibeCADPreferences.list_provider_models = original_list
                 if old_env is not None:
@@ -226,6 +293,8 @@ class TestVibeCADPreferences(unittest.TestCase):
                 "VibeCADPrefFetchModels": QtWidgets.QPushButton,
                 "VibeCADPrefReasoningEffort": QtWidgets.QComboBox,
                 "VibeCADPrefDotenvPath": QtWidgets.QLineEdit,
+                "VibeCADPrefOpenAIBaseUrl": QtWidgets.QLineEdit,
+                "VibeCADPrefAnthropicBaseUrl": QtWidgets.QLineEdit,
                 "VibeCADPrefBrowseDotenv": QtWidgets.QPushButton,
                 "VibeCADPrefApiKey": QtWidgets.QLineEdit,
                 "VibeCADPrefSaveApiKey": QtWidgets.QPushButton,

@@ -76,7 +76,7 @@ class TestVibeCADThumbnailMetadata(unittest.TestCase):
             )
             self.assertIn("&lt;b&gt;make it &amp; bigger&lt;/b&gt;", block)
             self.assertNotIn("<b>make it", block)
-            self.assertIn("<br/>", block)
+            self.assertIn("User:", block)
             self.assertIn(image.resolve().as_uri(), block)
             self.assertIn(
                 f'width="{self.gui.TRANSCRIPT_THUMBNAIL_WIDTH}"', block

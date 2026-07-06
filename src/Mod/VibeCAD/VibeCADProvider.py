@@ -141,6 +141,12 @@ VIBECAD_SYSTEM_INSTRUCTIONS = (
     "features on top. Respect checkpoint/deferred tool results by "
     "ending the turn with concise progress. Aim for a coherent "
     "completed design, not endless optional detail.\n\n"
+    "Keep user-facing progress concise. On workspace-entry or checkpoint "
+    "turns, state only the new document delta and the next immediate CAD "
+    "action in at most six short bullets. Do not repeat the original "
+    "brief, prior completed history, or a full verification audit unless "
+    "the user asks for that rationale; the activity stream already records "
+    "tool-level detail.\n\n"
     "Assume reasonable CAD defaults when unspecified: millimeters, "
     "sensible origin/plane choices, standard workbench conventions. "
     "Ask a question only when continuing would be destructive, "
@@ -148,7 +154,18 @@ VIBECAD_SYSTEM_INSTRUCTIONS = (
     "Do not report completion from prose alone. The document state "
     "must prove the requested CAD result is coherent against the "
     "brief's dimensions. For visible models, capture and inspect a "
-    "viewport screenshot before final completion."
+    "viewport screenshot before final completion.\n\n"
+    "TOOL AND WORKFLOW FEEDBACK. You are also a test pilot for the "
+    "VibeCAD tool surface itself. As you work, note where the provided "
+    "tools and prescribed flow help or hinder you: missing or awkward "
+    "tools, confusing parameters or descriptions, error messages that "
+    "did not point at the real cause, workflow steps that forced "
+    "workarounds, and tools or guidance that worked especially well. "
+    "When the part is complete, append a short 'Tooling feedback' "
+    "section to your final summary listing what was good and what was "
+    "bad, naming the specific tools and the moments that prompted each "
+    "point. Keep it factual and brief, and never let feedback replace "
+    "or dilute the completion report itself."
 )
 
 
@@ -164,6 +181,7 @@ class ProviderResult:
 
 ToolRunner = Callable[[str, str], dict[str, Any]]
 CancellationCheck = Callable[[], bool]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class BaseProvider:
@@ -173,6 +191,7 @@ class BaseProvider:
         context: dict[str, Any],
         tool_runner: ToolRunner | None = None,
         cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         raise NotImplementedError
 
@@ -186,6 +205,7 @@ class OfflineProvider(BaseProvider):
         context: dict[str, Any],
         tool_runner: ToolRunner | None = None,
         cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         if cancellation_check is not None and cancellation_check():
             raise ProviderUnavailable("VibeCAD run stopped by user.")
@@ -212,12 +232,14 @@ class OpenAIAgentsProvider(BaseProvider):
         reasoning_effort: str = "high",
         timeout_seconds: float | None = None,
         max_turns: int | None = 80,
+        base_url: str | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
+        self.base_url = base_url
 
     def run(
         self,
@@ -225,6 +247,7 @@ class OpenAIAgentsProvider(BaseProvider):
         context: dict[str, Any],
         tool_runner: ToolRunner | None = None,
         cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         try:
             return _run_agents_subprocess(
@@ -236,7 +259,9 @@ class OpenAIAgentsProvider(BaseProvider):
                 reasoning_effort=self.reasoning_effort,
                 timeout_seconds=self.timeout_seconds,
                 max_turns=self.max_turns,
+                base_url=self.base_url,
                 cancellation_check=cancellation_check,
+                progress_callback=progress_callback,
             )
         except TimeoutError as exc:
             if self.timeout_seconds and self.timeout_seconds > 0:
@@ -262,12 +287,14 @@ class AnthropicProvider(BaseProvider):
         reasoning_effort: str = "high",
         timeout_seconds: float | None = None,
         max_turns: int | None = 80,
+        base_url: str | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
+        self.base_url = base_url
 
     def run(
         self,
@@ -275,6 +302,7 @@ class AnthropicProvider(BaseProvider):
         context: dict[str, Any],
         tool_runner: ToolRunner | None = None,
         cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         try:
             return _run_agents_subprocess(
@@ -286,7 +314,9 @@ class AnthropicProvider(BaseProvider):
                 reasoning_effort=self.reasoning_effort,
                 timeout_seconds=self.timeout_seconds,
                 max_turns=self.max_turns,
+                base_url=self.base_url,
                 cancellation_check=cancellation_check,
+                progress_callback=progress_callback,
                 child_main=_anthropic_child_main,
                 provider_label="Anthropic provider",
             )
@@ -299,19 +329,34 @@ class AnthropicProvider(BaseProvider):
 
 
 @contextmanager
-def _temporary_openai_key(api_key: str | None):
-    if not api_key:
+def _temporary_openai_env(api_key: str | None, base_url: str | None = None):
+    """Temporarily set OpenAI SDK environment overrides, restoring them after.
+
+    The Agents SDK constructs its own OpenAI client internally, so the API key
+    and any custom endpoint must be delivered through the standard
+    ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` environment variables.
+    """
+    overrides = {
+        name: value
+        for name, value in (
+            ("OPENAI_API_KEY", api_key),
+            ("OPENAI_BASE_URL", base_url),
+        )
+        if value
+    }
+    if not overrides:
         yield
         return
-    original = os.environ.get("OPENAI_API_KEY")
-    os.environ["OPENAI_API_KEY"] = api_key
+    originals = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
     try:
         yield
     finally:
-        if original is None:
-            os.environ.pop("OPENAI_API_KEY", None)
-        else:
-            os.environ["OPENAI_API_KEY"] = original
+        for name, original in originals.items():
+            if original is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original
 
 
 def _run_with_deadline(call: Callable[[], Any], timeout_seconds: float) -> Any:
@@ -346,9 +391,11 @@ def _run_agents_subprocess(
     reasoning_effort: str | None,
     timeout_seconds: float | None,
     max_turns: int | None = 80,
+    base_url: str | None = None,
     clear_inherited_modules: bool = True,
     event_pump: Callable[[], None] | None = None,
     cancellation_check: CancellationCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
     child_main: Callable[..., None] | None = None,
     provider_label: str = "OpenAI Agents provider",
 ) -> ProviderResult:
@@ -370,6 +417,7 @@ def _run_agents_subprocess(
             timeout_seconds,
             max_turns,
             clear_inherited_modules,
+            base_url,
         ),
     )
     process.daemon = True
@@ -385,6 +433,17 @@ def _run_agents_subprocess(
         if replacement_stdin is not None:
             replacement_stdin.close()
     child_conn.close()
+    provider_started_at = time.monotonic()
+    last_provider_activity_at = provider_started_at
+    last_wait_notice_at = 0.0
+    _emit_provider_progress(
+        progress_callback,
+        {
+            "event": "provider_subprocess_started",
+            "provider": provider_label,
+            "pid": process.pid,
+        },
+    )
 
     deadline = (
         time.monotonic() + timeout_seconds
@@ -409,16 +468,39 @@ def _run_agents_subprocess(
                     raise ProviderUnavailable(
                         f"{provider_label} process ended before sending a result."
                     ) from exc
+                last_provider_activity_at = time.monotonic()
                 message_type = message.get("type")
+                last_wait_notice_at = 0.0
                 if message_type == "tool":
                     if cancellation_check is not None and cancellation_check():
                         raise ProviderUnavailable("VibeCAD run stopped by user.")
+                    tool_name = str(message.get("tool_name", ""))
+                    arguments_json = str(message.get("arguments_json") or "{}")
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_tool_requested",
+                            "provider": provider_label,
+                            "tool_name": tool_name,
+                            "arguments": _tool_arguments_summary(arguments_json),
+                        },
+                    )
                     result = _call_parent_tool(
                         tool_runner,
-                        message.get("tool_name", ""),
-                        message.get("arguments_json", "{}"),
+                        tool_name,
+                        arguments_json,
                     )
                     parent_conn.send({"type": "tool_result", "result": result})
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_tool_result_sent",
+                            "provider": provider_label,
+                            "tool_name": tool_name,
+                            "ok": bool(result.get("ok")),
+                            "error": result.get("error"),
+                        },
+                    )
                 elif message_type == "done":
                     process.join(timeout=0.2)
                     if process.is_alive():
@@ -428,11 +510,32 @@ def _run_agents_subprocess(
                         final_output=str(message.get("final_output", "")),
                         raw=message.get("raw"),
                     )
+                elif message_type == "progress":
+                    event = message.get("event")
+                    if isinstance(event, dict):
+                        _emit_provider_progress(progress_callback, event)
                 elif message_type == "error":
                     error = str(message.get("error", "unknown provider error"))
                     raise ProviderUnavailable(error)
             else:
                 pump_events()
+                now = time.monotonic()
+                if (
+                    progress_callback is not None
+                    and now - last_provider_activity_at >= 8.0
+                    and now - last_wait_notice_at >= 15.0
+                ):
+                    last_wait_notice_at = now
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_waiting",
+                            "provider": provider_label,
+                            "elapsed_seconds": now - provider_started_at,
+                            "idle_seconds": now - last_provider_activity_at,
+                            "pid": process.pid,
+                        },
+                    )
 
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError
@@ -470,6 +573,44 @@ def _process_provider_wait_events() -> None:
         app.processEvents(QtCore.QEventLoop.AllEvents, 10)
     except TypeError:
         app.processEvents()
+
+
+def _emit_provider_progress(
+    progress_callback: ProgressCallback | None,
+    event: dict[str, Any],
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(dict(event))
+    except Exception:
+        return
+
+
+def _send_child_progress(conn: Any, event: dict[str, Any]) -> None:
+    try:
+        conn.send({"type": "progress", "event": _json_safe(event)})
+    except Exception:
+        pass
+
+
+def _tool_arguments_summary(arguments_json: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {"bytes": len(arguments_json.encode("utf-8"))}
+    try:
+        arguments = json.loads(arguments_json or "{}")
+    except Exception:
+        summary["valid_json"] = False
+        return summary
+    summary["valid_json"] = True
+    if not isinstance(arguments, dict):
+        summary["shape"] = type(arguments).__name__
+        return summary
+    keys = [str(key) for key in arguments]
+    summary["key_count"] = len(keys)
+    summary["keys"] = keys[:8]
+    if len(keys) > 8:
+        summary["truncated"] = True
+    return summary
 
 
 def _call_parent_tool(
@@ -591,6 +732,7 @@ def _agents_child_main(
     timeout_seconds: float | None,
     max_turns: int | None,
     clear_inherited_modules: bool,
+    base_url: str | None = None,
 ) -> None:
     try:
         if clear_inherited_modules:
@@ -657,6 +799,7 @@ def _agents_child_main(
                 "schema": "vibecad-openai-agents-request-v1",
                 "created_at_unix": time.time(),
                 "model": model,
+                "base_url": base_url,
                 "reasoning_effort": reasoning_effort,
                 "max_turns": max_turns,
                 "timeout_seconds": timeout_seconds,
@@ -688,7 +831,7 @@ def _agents_child_main(
         return await run_task
 
     try:
-        with _temporary_openai_key(api_key):
+        with _temporary_openai_env(api_key, base_url):
             result = asyncio.run(_run())
         conn.send({"type": "done", "final_output": result.final_output, "raw": None})
     except TimeoutError:
@@ -921,6 +1064,115 @@ def _anthropic_final_text(content_blocks: list[Any]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _anthropic_block_type(block: Any) -> str:
+    block_type = getattr(block, "type", None) or (
+        block.get("type") if isinstance(block, dict) else None
+    )
+    return str(block_type or "unknown")
+
+
+def _anthropic_response_summary(response: Any) -> dict[str, Any]:
+    blocks = list(getattr(response, "content", []) or [])
+    counts: dict[str, int] = {}
+    text_chars = 0
+    thinking_chars = 0
+    tool_names: list[str] = []
+    for block in blocks:
+        block_type = _anthropic_block_type(block)
+        counts[block_type] = counts.get(block_type, 0) + 1
+        if block_type == "text":
+            text = getattr(block, "text", None) or (
+                block.get("text") if isinstance(block, dict) else None
+            )
+            if text:
+                text_chars += len(str(text))
+        elif block_type == "thinking":
+            thinking = getattr(block, "thinking", None) or (
+                block.get("thinking") if isinstance(block, dict) else None
+            )
+            if thinking:
+                thinking_chars += len(str(thinking))
+        elif block_type == "tool_use":
+            name = getattr(block, "name", None) or (
+                block.get("name") if isinstance(block, dict) else None
+            )
+            if name:
+                tool_names.append(str(name))
+    return {
+        "stop_reason": str(getattr(response, "stop_reason", "") or ""),
+        "block_counts": counts,
+        "text_chars": text_chars,
+        "thinking_chars": thinking_chars,
+        "tool_names": tool_names[:8],
+        "tool_name_count": len(tool_names),
+    }
+
+
+def _anthropic_stream_event_summary(event: Any) -> dict[str, Any]:
+    event_type = getattr(event, "type", None) or (
+        event.get("type") if isinstance(event, dict) else None
+    )
+    summary: dict[str, Any] = {"stream_event_type": str(event_type or "unknown")}
+    block = getattr(event, "content_block", None) or (
+        event.get("content_block") if isinstance(event, dict) else None
+    )
+    if block is not None:
+        summary["block_type"] = _anthropic_block_type(block)
+        name = getattr(block, "name", None) or (
+            block.get("name") if isinstance(block, dict) else None
+        )
+        if name:
+            summary["tool_name"] = str(name)
+    delta = getattr(event, "delta", None) or (
+        event.get("delta") if isinstance(event, dict) else None
+    )
+    if delta is not None:
+        delta_type = getattr(delta, "type", None) or (
+            delta.get("type") if isinstance(delta, dict) else None
+        )
+        if delta_type:
+            summary["delta_type"] = str(delta_type)
+        stop_reason = getattr(delta, "stop_reason", None) or (
+            delta.get("stop_reason") if isinstance(delta, dict) else None
+        )
+        if stop_reason:
+            summary["stop_reason"] = str(stop_reason)
+    return summary
+
+
+def _anthropic_request_debug_payload(
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    thinking: dict[str, Any] | None,
+    max_tokens: int,
+    max_turns: int | None,
+    timeout_seconds: float | None,
+    system_blocks: list[dict[str, Any]],
+    tool_definitions: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    context: dict[str, Any],
+    turn: int,
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": "vibecad-anthropic-request-v1",
+        "created_at_unix": time.time(),
+        "turn": turn,
+        "model": model,
+        "base_url": base_url,
+        "reasoning_effort": reasoning_effort,
+        "thinking": thinking,
+        "max_tokens": max_tokens,
+        "max_turns": max_turns,
+        "timeout_seconds": timeout_seconds,
+        "system": system_blocks,
+        "tools": tool_definitions,
+        "messages": messages,
+        "model_visible_context": _model_visible_context(context),
+    }
+
+
 def _anthropic_child_main(
     conn,
     prompt: str,
@@ -931,6 +1183,7 @@ def _anthropic_child_main(
     timeout_seconds: float | None,
     max_turns: int | None,
     clear_inherited_modules: bool,
+    base_url: str | None = None,
 ) -> None:
     try:
         if clear_inherited_modules:
@@ -988,6 +1241,8 @@ def _anthropic_child_main(
         client_kwargs: dict[str, Any] = {"max_retries": 2}
         if api_key:
             client_kwargs["api_key"] = api_key
+        if base_url:
+            client_kwargs["base_url"] = base_url
         if timeout_seconds is not None and timeout_seconds > 0:
             client_kwargs["timeout"] = timeout_seconds
         client = anthropic.Anthropic(**client_kwargs)
@@ -1001,38 +1256,114 @@ def _anthropic_child_main(
         if thinking is not None:
             request_kwargs["thinking"] = thinking
 
-        _write_anthropic_request_dump(
-            {
-                "schema": "vibecad-anthropic-request-v1",
-                "created_at_unix": time.time(),
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "thinking": thinking,
-                "max_tokens": max_tokens,
-                "max_turns": max_turns,
-                "timeout_seconds": timeout_seconds,
-                "system": system_blocks,
-                "tools": tool_definitions,
-                "messages": messages,
-                "model_visible_context": _model_visible_context(context),
-            }
-        )
+        latest_dump = _anthropic_request_dump_dir() / "latest-anthropic-request.json"
 
-        def _stream_response() -> Any:
+        def _dump_request(turn: int) -> str | None:
+            path = _write_anthropic_request_dump(
+                _anthropic_request_debug_payload(
+                    model=model,
+                    base_url=base_url,
+                    reasoning_effort=reasoning_effort,
+                    thinking=request_kwargs.get("thinking"),
+                    max_tokens=max_tokens,
+                    max_turns=max_turns,
+                    timeout_seconds=timeout_seconds,
+                    system_blocks=system_blocks,
+                    tool_definitions=tool_definitions,
+                    messages=messages,
+                    context=context,
+                    turn=turn,
+                )
+            )
+            _send_child_progress(
+                conn,
+                {
+                    "event": "anthropic_request_dumped",
+                    "turn": turn,
+                    "dump_path": path,
+                    "latest_dump_path": str(latest_dump),
+                },
+            )
+            return path
+
+        def _stream_response(turn: int) -> Any:
             # The SDK rejects non-streaming requests that could exceed ten
             # minutes (large max_tokens plus thinking budgets), so always
             # stream and accumulate the final message.
+            _send_child_progress(
+                conn,
+                {
+                    "event": "anthropic_request_started",
+                    "turn": turn,
+                    "model": model,
+                    "message_count": len(messages),
+                    "tool_count": len(tool_definitions),
+                    "max_tokens": max_tokens,
+                    "thinking": request_kwargs.get("thinking"),
+                    "output_config": request_kwargs.get("output_config"),
+                },
+            )
             with client.messages.stream(
                 messages=messages, **request_kwargs
             ) as stream:
+                event_count = 0
+                last_delta_notice_at = 0.0
+                try:
+                    iterator = iter(stream)
+                except TypeError:
+                    _send_child_progress(
+                        conn,
+                        {
+                            "event": "anthropic_stream_waiting",
+                            "turn": turn,
+                        },
+                    )
+                    return stream.get_final_message()
+                for stream_event in iterator:
+                    event_count += 1
+                    summary = _anthropic_stream_event_summary(stream_event)
+                    stream_event_type = summary.get("stream_event_type")
+                    delta_type = summary.get("delta_type")
+                    now = time.monotonic()
+                    should_report = stream_event_type in {
+                        "message_start",
+                        "content_block_start",
+                        "content_block_stop",
+                        "message_delta",
+                        "message_stop",
+                    }
+                    if (
+                        not should_report
+                        and delta_type
+                        and now - last_delta_notice_at >= 5.0
+                    ):
+                        should_report = True
+                        last_delta_notice_at = now
+                    if should_report:
+                        event = {
+                            "event": "anthropic_stream_event",
+                            "turn": turn,
+                            "event_count": event_count,
+                        }
+                        event.update(summary)
+                        _send_child_progress(conn, event)
+                _send_child_progress(
+                    conn,
+                    {
+                        "event": "anthropic_stream_completed",
+                        "turn": turn,
+                        "event_count": event_count,
+                    },
+                )
                 return stream.get_final_message()
 
         turn_limit = max_turns if max_turns is not None and max_turns > 0 else 80
         loop = asyncio.new_event_loop()
         try:
-            for _ in range(turn_limit):
+            for turn in range(1, turn_limit + 1):
+                _dump_request(turn)
                 try:
-                    response = _stream_response()
+                    response = _stream_response(turn)
                 except anthropic.BadRequestError as exc:
                     if (
                         "thinking.type.enabled" not in str(exc)
@@ -1045,8 +1376,27 @@ def _anthropic_child_main(
                     effort = _anthropic_adaptive_effort(reasoning_effort)
                     if effort:
                         request_kwargs["output_config"] = {"effort": effort}
-                    response = _stream_response()
+                    _send_child_progress(
+                        conn,
+                        {
+                            "event": "anthropic_request_retried",
+                            "turn": turn,
+                            "reason": "adaptive_thinking_required",
+                            "thinking": request_kwargs.get("thinking"),
+                            "output_config": request_kwargs.get("output_config"),
+                        },
+                    )
+                    _dump_request(turn)
+                    response = _stream_response(turn)
                 content_blocks = list(response.content)
+                _send_child_progress(
+                    conn,
+                    {
+                        "event": "anthropic_response_received",
+                        "turn": turn,
+                        **_anthropic_response_summary(response),
+                    },
+                )
                 messages.append(
                     {
                         "role": "assistant",

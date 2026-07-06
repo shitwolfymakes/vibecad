@@ -42,6 +42,7 @@ from VibeCADProvider import (
     MAX_PROVIDER_IMAGE_BYTES,
     _build_provider_function_tools,
     _run_agents_subprocess,
+    _temporary_openai_env,
     _write_anthropic_request_dump,
 )
 from VibeCADSession import (
@@ -239,23 +240,91 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         provider = AnthropicProvider()
         self.assertEqual(provider.model, DEFAULT_ANTHROPIC_MODEL)
         self.assertEqual(provider.reasoning_effort, "high")
+        self.assertIsNone(provider.base_url)
         configured = AnthropicProvider(
             model="claude-sonnet-5",
             api_key="sk-ant-test",
             reasoning_effort="medium",
+            base_url="http://localhost:9000",
         )
         self.assertEqual(configured.model, "claude-sonnet-5")
         self.assertEqual(configured.api_key, "sk-ant-test")
         self.assertEqual(configured.reasoning_effort, "medium")
+        self.assertEqual(configured.base_url, "http://localhost:9000")
+
+
+class TestVibeCADProviderBaseUrl(unittest.TestCase):
+    """Base URL overrides for provider constructors and the OpenAI env bridge."""
+
+    def test_openai_provider_stores_base_url(self):
+        self.assertIsNone(OpenAIAgentsProvider().base_url)
+        provider = OpenAIAgentsProvider(base_url="http://localhost:8000/v1")
+        self.assertEqual(provider.base_url, "http://localhost:8000/v1")
+
+    def test_temporary_openai_env_sets_and_restores_overrides(self):
+        old_key = os.environ.get("OPENAI_API_KEY")
+        old_base = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_API_KEY"] = "sk-original"
+            os.environ.pop("OPENAI_BASE_URL", None)
+            with _temporary_openai_env("sk-override", "http://localhost:8000/v1"):
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "sk-override")
+                self.assertEqual(
+                    os.environ["OPENAI_BASE_URL"], "http://localhost:8000/v1"
+                )
+            self.assertEqual(os.environ["OPENAI_API_KEY"], "sk-original")
+            self.assertNotIn("OPENAI_BASE_URL", os.environ)
+
+            # Key-only override leaves OPENAI_BASE_URL untouched.
+            os.environ["OPENAI_BASE_URL"] = "http://pre-existing:1234/v1"
+            with _temporary_openai_env("sk-override", None):
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "sk-override")
+                self.assertEqual(
+                    os.environ["OPENAI_BASE_URL"], "http://pre-existing:1234/v1"
+                )
+            self.assertEqual(
+                os.environ["OPENAI_BASE_URL"], "http://pre-existing:1234/v1"
+            )
+
+            # No overrides at all is a no-op.
+            with _temporary_openai_env(None, None):
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "sk-original")
+        finally:
+            for name, value in (
+                ("OPENAI_API_KEY", old_key),
+                ("OPENAI_BASE_URL", old_base),
+            ):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    def test_temporary_openai_env_restores_on_exception(self):
+        old_base = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ.pop("OPENAI_BASE_URL", None)
+            with self.assertRaises(RuntimeError):
+                with _temporary_openai_env(None, "http://localhost:8000/v1"):
+                    self.assertEqual(
+                        os.environ["OPENAI_BASE_URL"], "http://localhost:8000/v1"
+                    )
+                    raise RuntimeError("boom")
+            self.assertNotIn("OPENAI_BASE_URL", os.environ)
+        finally:
+            if old_base is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = old_base
 
 
 class _ProviderDispatchStubService:
     """Minimal stand-in for VibeCADService used by choose_provider tests."""
 
-    def __init__(self, provider_name, model, can_call=True):
+    def __init__(self, provider_name, model, can_call=True, base_url=None):
         self._provider_name = provider_name
         self._model = model
         self._can_call = can_call
+        self._base_url = base_url
 
     def auth_state(self):
         if self._can_call:
@@ -274,6 +343,9 @@ class _ProviderDispatchStubService:
     def provider_reasoning_effort(self):
         return "medium"
 
+    def provider_base_url(self):
+        return self._base_url
+
 
 class TestVibeCADProviderDispatch(unittest.TestCase):
     def test_choose_provider_dispatches_anthropic_preference(self):
@@ -284,6 +356,7 @@ class TestVibeCADProviderDispatch(unittest.TestCase):
         self.assertEqual(provider.model, "claude-sonnet-5")
         self.assertEqual(provider.api_key, "sk-unit-test-key")
         self.assertEqual(provider.reasoning_effort, "medium")
+        self.assertIsNone(provider.base_url)
 
     def test_choose_provider_dispatches_openai_preference(self):
         provider = choose_provider(
@@ -292,6 +365,28 @@ class TestVibeCADProviderDispatch(unittest.TestCase):
         self.assertIsInstance(provider, OpenAIAgentsProvider)
         self.assertEqual(provider.model, "gpt-5.5")
         self.assertEqual(provider.api_key, "sk-unit-test-key")
+        self.assertIsNone(provider.base_url)
+
+    def test_choose_provider_passes_configured_base_url(self):
+        anthropic = choose_provider(
+            _ProviderDispatchStubService(
+                "anthropic",
+                "claude-sonnet-5",
+                base_url="http://localhost:9000",
+            )
+        )
+        self.assertIsInstance(anthropic, AnthropicProvider)
+        self.assertEqual(anthropic.base_url, "http://localhost:9000")
+
+        openai = choose_provider(
+            _ProviderDispatchStubService(
+                "openai",
+                "gpt-5.5",
+                base_url="http://localhost:8000/v1",
+            )
+        )
+        self.assertIsInstance(openai, OpenAIAgentsProvider)
+        self.assertEqual(openai.base_url, "http://localhost:8000/v1")
 
     def test_choose_provider_falls_back_to_offline(self):
         offline_by_preference = choose_provider(
