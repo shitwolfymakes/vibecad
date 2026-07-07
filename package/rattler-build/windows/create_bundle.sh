@@ -18,6 +18,34 @@ copy_tree() {
   fi
 
   echo "Copying directory: ${source} -> ${target}"
+  if command -v robocopy.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
+    local source_win
+    local target_win
+    source_win="$(cygpath -w "${source}")"
+    target_win="$(cygpath -w "${target}")"
+    mkdir -p "${target}"
+    set +e
+    MSYS2_ARG_CONV_EXCL='*' robocopy.exe \
+      "${source_win}" \
+      "${target_win}" \
+      /E \
+      /COPY:DAT \
+      /DCOPY:DAT \
+      /R:2 \
+      /W:2 \
+      /NFL \
+      /NDL \
+      /NJH \
+      /NJS \
+      /NP
+    local robocopy_status=$?
+    set -e
+    if [[ ${robocopy_status} -lt 8 ]]; then
+      return 0
+    fi
+    echo "robocopy failed with exit code ${robocopy_status}" >&2
+  fi
+
   if ! "${conda_env}/python.exe" - "${source}" "${target}" <<'PY'
 import os
 import shutil
