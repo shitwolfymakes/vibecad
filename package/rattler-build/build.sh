@@ -1,3 +1,9 @@
+# CI forwards CCACHE_DIR to a persisted cache directory; local builds get an
+# empty value from the recipe, so drop it and let ccache use its own default.
+if [[ -z "${CCACHE_DIR:-}" ]]; then
+    unset CCACHE_DIR
+fi
+
 if [[ ${HOST} =~ .*linux.*  ]]; then
     CMAKE_PRESET=conda-linux-release
 

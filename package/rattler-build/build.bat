@@ -1,5 +1,9 @@
 @echo on
 
+@REM CI forwards CCACHE_DIR to a persisted cache directory; local builds get an
+@REM empty value from the recipe, so drop it and let ccache use its own default.
+if "%CCACHE_DIR%"=="" set "CCACHE_DIR="
+
 @REM :: free up extra disk space, compare
 @REM :: https://github.com/conda-forge/conda-smithy/issues/1949
 @REM rmdir /s /q C:\hostedtoolcache\windows

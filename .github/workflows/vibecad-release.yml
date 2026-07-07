@@ -103,13 +103,33 @@ jobs:
           echo "matched-key=${{ steps.cache-pixi-linux.outputs.cache-matched-key }}"
           echo "primary-key=${{ steps.cache-pixi-linux.outputs.cache-primary-key }}"
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          # Rolling key: every run saves a fresh entry and restores the most
+          # recent prior one via restore-keys, so ccache updates each build.
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-linux-
+
       - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: "2G"
         run: |
           set -euo pipefail
           pixi install -e default
           pixi install -e package
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-linux-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build Linux AppImage
         shell: bash
@@ -195,13 +215,33 @@ jobs:
           echo "matched-key=${{ steps.cache-pixi-windows.outputs.cache-matched-key }}"
           echo "primary-key=${{ steps.cache-pixi-windows.outputs.cache-primary-key }}"
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          # Rolling key: every run saves a fresh entry and restores the most
+          # recent prior one via restore-keys, so ccache updates each build.
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-windows-
+
       - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}\ccache
+          CCACHE_MAXSIZE: "2G"
         run: |
           set -euo pipefail
           pixi install -e default
           pixi install -e package
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\ccache
+          key: ccache-windows-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build Windows release assets
         shell: bash
